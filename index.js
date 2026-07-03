@@ -835,6 +835,204 @@ async function setAnnouncementChannelId(guildId, channelId) {
   ANNOUNCEMENT_CACHE.set(guildId, channelId);
 }
 
+// ===== Daily Quests System =====
+// 9 personal quests/day per player (3 action, 3 economy, 3 social) + 1 shared
+// community quest per guild/day. Personal completion -> DM the player.
+// Community completion -> announce in the guild's announcement channel.
+
+const QUEST_SECTION_BONUS_CASH = 300;
+const QUEST_SECTION_BONUS_XP = 5;
+const QUEST_FULL_CLEAR_BONUS_CASH = 1000;
+const QUEST_FULL_CLEAR_BONUS_XP = 20;
+
+const DAILY_QUEST_ACTION_POOL = [
+  { id: 'act_scavenge3', section: 'action', track: 'scavenge', target: 3, label: 'Scavenge 3 Times', desc: 'Use /scavenge 3 times.', cashReward: 300, xpReward: 5 },
+  { id: 'act_labor2', section: 'action', track: 'labor', target: 2, label: 'Work 2 Shifts', desc: 'Use /labor 2 times.', cashReward: 250, xpReward: 4 },
+  { id: 'act_fish1', section: 'action', track: 'fish', target: 1, label: 'Go Fishing', desc: 'Reel in a catch with /fish.', cashReward: 200, xpReward: 4 },
+  { id: 'act_duelwin1', section: 'action', track: 'duelWin', target: 1, label: 'Win a Duel', desc: 'Win 1 /card-duel or /marble-duel.', cashReward: 400, xpReward: 6 },
+  { id: 'act_steal1', section: 'action', track: 'stealSuccess', target: 1, label: 'Pull Off a Heist', desc: 'Successfully /steal from someone.', cashReward: 350, xpReward: 5 },
+  { id: 'act_trade1', section: 'action', track: 'tradeComplete', target: 1, label: 'Strike a Deal', desc: 'Complete a /trade with another player.', cashReward: 300, xpReward: 5 }
+];
+
+const DAILY_QUEST_ECONOMY_POOL = [
+  { id: 'eco_sell1', section: 'economy', track: 'sellArtefact', target: 1, label: 'Make a Sale', desc: 'Sell an artefact via /mass-sell or trade.', cashReward: 200, xpReward: 4, weight: 4 },
+  { id: 'eco_deposit1', section: 'economy', track: 'bankDeposit', target: 1, label: 'Bank It', desc: 'Deposit cash into /bank.', cashReward: 150, xpReward: 3, weight: 4 },
+  { id: 'eco_find3star', section: 'economy', track: 'find3StarPlus', target: 1, label: 'Strike It Rich', desc: 'Find a 3-Star artefact or higher.', cashReward: 500, xpReward: 8, weight: 4 },
+  { id: 'eco_findshiny', section: 'economy', track: 'findShiny', target: 1, label: 'Shiny Hunter', desc: 'Find a ✨ Shiny artefact (rare bonus quest!).', cashReward: 2000, xpReward: 20, weight: 1 }
+];
+
+const DAILY_QUEST_SOCIAL_POOL = [
+  { id: 'soc_messages20', section: 'social', track: 'sendMessage', target: 20, label: 'Stay Chatty', desc: 'Send 20 messages in the server.', cashReward: 200, xpReward: 4 },
+  { id: 'soc_observe1', section: 'social', track: 'observeUsed', target: 1, label: 'Scout a Rival', desc: 'Use /observe on another player.', cashReward: 150, xpReward: 3 },
+  { id: 'soc_convert1', section: 'social', track: 'convertXp', target: 1, label: 'Cash Out XP', desc: 'Convert your XP to cash via /convert.', cashReward: 150, xpReward: 3 }
+];
+
+const COMMUNITY_QUEST_POOL = [
+  { id: 'comm_scavenge', track: 'scavenge', target: 50, label: 'Community Mining Spree', desc: 'Scavenge 50 times as a server today.', cashReward: 150, xpReward: 3 },
+  { id: 'comm_labor', track: 'labor', target: 40, label: 'All Hands on Deck', desc: 'Complete 40 labor shifts as a server today.', cashReward: 150, xpReward: 3 },
+  { id: 'comm_sell', track: 'sellArtefact', target: 30, label: 'Market Day', desc: 'Sell 30 artefacts as a server today.', cashReward: 150, xpReward: 3 },
+  { id: 'comm_messages', track: 'sendMessage', target: 150, label: 'Server Chatter', desc: 'Send 150 messages as a server today.', cashReward: 100, xpReward: 2 },
+  { id: 'comm_trade', track: 'tradeComplete', target: 15, label: 'Trading Frenzy', desc: 'Complete 15 trades as a server today.', cashReward: 200, xpReward: 4 }
+];
+
+function getTodayDateKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function pickRandomQuests(pool, count) {
+  const arr = pool.slice();
+  const chosen = [];
+  const n = Math.min(count, arr.length);
+  for (let i = 0; i < n; i++) {
+    const totalWeight = arr.reduce((sum, q) => sum + (q.weight || 1), 0);
+    let roll = Math.random() * totalWeight;
+    let idx = 0;
+    for (; idx < arr.length; idx++) {
+      roll -= (arr[idx].weight || 1);
+      if (roll <= 0) break;
+    }
+    idx = Math.min(idx, arr.length - 1);
+    chosen.push(arr[idx]);
+    arr.splice(idx, 1);
+  }
+  return chosen;
+}
+
+function buildDailyQuestSet() {
+  const action = pickRandomQuests(DAILY_QUEST_ACTION_POOL, 3);
+  const economy = pickRandomQuests(DAILY_QUEST_ECONOMY_POOL, 3);
+  const social = DAILY_QUEST_SOCIAL_POOL.slice();
+  return [...action, ...economy, ...social].map(q => ({
+    id: q.id, section: q.section, track: q.track, label: q.label, desc: q.desc,
+    target: q.target, progress: 0, completed: false, claimed: false,
+    cashReward: q.cashReward, xpReward: q.xpReward
+  }));
+}
+
+function ensureDailyQuests(user) {
+  const today = getTodayDateKey();
+  if (!user.dailyQuests || user.dailyQuests.date !== today) {
+    user.dailyQuests = {
+      date: today,
+      quests: buildDailyQuestSet(),
+      sectionBonuses: { action: false, economy: false, social: false },
+      fullClearBonus: false
+    };
+  }
+  return user.dailyQuests;
+}
+
+async function ensureCommunityQuest(guildId) {
+  if (!guildId || !guildSettingsCollection) return null;
+  const today = getTodayDateKey();
+  const doc = await guildSettingsCollection.findOne({ _id: guildId });
+  const existing = doc && doc.communityQuest;
+  if (existing && existing.date === today) return existing;
+
+  const template = COMMUNITY_QUEST_POOL[Math.floor(Math.random() * COMMUNITY_QUEST_POOL.length)];
+  const fresh = {
+    date: today, id: template.id, track: template.track, label: template.label, desc: template.desc,
+    target: template.target, progress: 0, contributors: [], completed: false, claimedBy: [],
+    cashReward: template.cashReward, xpReward: template.xpReward
+  };
+  await guildSettingsCollection.updateOne({ _id: guildId }, { $set: { communityQuest: fresh } }, { upsert: true });
+  return fresh;
+}
+
+async function dmQuestCompletion(userId, quest) {
+  try {
+    const discordUser = await client.users.fetch(userId);
+    const embed = new EmbedBuilder()
+      .setTitle('🎯 Daily Quest Ready to Claim!')
+      .setDescription(`You finished **${quest.label}**!\n${quest.desc}`)
+      .addFields(
+        { name: 'Reward Waiting', value: `$${quest.cashReward.toLocaleString()} + ${quest.xpReward} XP`, inline: true },
+        { name: 'Section', value: quest.section.charAt(0).toUpperCase() + quest.section.slice(1), inline: true }
+      )
+      .setColor(0x2ECC71)
+      .setFooter({ text: 'Run /quests and hit Claim to collect your reward!' })
+      .setTimestamp();
+    await discordUser.send({ embeds: [embed] });
+  } catch (err) {
+    console.warn(`Could not DM user ${userId} for quest completion (DMs may be closed).`);
+  }
+}
+
+async function announceCommunityQuestComplete(guildId, community) {
+  try {
+    const channelId = await getAnnouncementChannelId(guildId);
+    if (!channelId) return;
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🌍 Server Quest Complete!')
+      .setDescription(`The server has completed today's community goal: **${community.label}**!\n${community.desc}\n\nContributors can claim their reward below.`)
+      .addFields(
+        { name: 'Contributors', value: `${community.contributors.length} player(s)`, inline: true },
+        { name: 'Reward (each)', value: `$${community.cashReward.toLocaleString()} + ${community.xpReward} XP`, inline: true }
+      )
+      .setColor(0x1ABC9C)
+      .setFooter({ text: 'A new community quest will appear tomorrow!' })
+      .setTimestamp();
+
+    const claimRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`quest_claim_community_${guildId}`)
+        .setLabel('🎁 Claim Community Reward')
+        .setStyle(ButtonStyle.Success)
+    );
+
+    await channel.send({ embeds: [embed], components: [claimRow] });
+  } catch (err) {
+    console.error('announceCommunityQuestComplete error:', err);
+  }
+}
+
+async function updateQuestProgress(userId, guildId, track, amount = 1) {
+  try {
+    if (userId) {
+      const user = await getUser(userId);
+      const dq = ensureDailyQuests(user);
+      let changed = false;
+
+      for (const quest of dq.quests) {
+        if (quest.track !== track || quest.completed) continue;
+        quest.progress = Math.min(quest.target, quest.progress + amount);
+        changed = true;
+
+        if (quest.progress >= quest.target) {
+          quest.completed = true;
+          await dmQuestCompletion(userId, quest);
+        }
+      }
+
+      if (changed) await saveUser(userId);
+    }
+  } catch (err) {
+    console.error('updateQuestProgress (personal) error:', err);
+  }
+
+  try {
+    if (guildId) {
+      const community = await ensureCommunityQuest(guildId);
+      if (community && community.track === track && !community.completed) {
+        community.progress = Math.min(community.target, community.progress + amount);
+        if (userId && !community.contributors.includes(userId)) community.contributors.push(userId);
+
+        if (community.progress >= community.target) {
+          community.completed = true;
+          await announceCommunityQuestComplete(guildId, community);
+        }
+
+        await guildSettingsCollection.updateOne({ _id: guildId }, { $set: { communityQuest: community } });
+      }
+    }
+  } catch (err) {
+    console.error('updateQuestProgress (community) error:', err);
+  }
+}
+
 async function broadcastToAnnouncementChannels(embed) {
   let delivered = 0;
   let failed = 0;
@@ -1324,6 +1522,7 @@ client.on('messageCreate', async (message) => {
       user.xpData.lastMessage = now;
       await saveUserData();
     }
+    await updateQuestProgress(userId, message.guildId, 'sendMessage', 1);
   }
 });
 
@@ -1542,6 +1741,10 @@ client.once('clientReady', async () => {
     new SlashCommandBuilder()
       .setName('collection')
       .setDescription('Browse your artefact field guide — see what you have and have not discovered'),
+
+    new SlashCommandBuilder()
+      .setName('quests')
+      .setDescription('View your daily quests and the server community quest'),
 
     new SlashCommandBuilder()
       .setName('give-roles')
@@ -2227,6 +2430,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'observe':
         await handleObserveCommand(interaction, userId);
+        break;
+
+      case 'quests':
+        await handleQuestsCommand(interaction, userId);
         break;
 
       case 'configure-observation':
@@ -2932,6 +3139,12 @@ async function dispatchPrefixCommand(message, tokens) {
       commandName = 'scavenge';
       break;
 
+    case 'quests':
+    case 'quest':
+      handler = (ix) => handleQuestsCommand(ix, message.author.id);
+      commandName = 'quests';
+      break;
+
     case 'store':
     case 'shop':
       handler = async (ix) => {
@@ -3319,6 +3532,7 @@ async function handleBankCommand(interaction, userId) {
   userData[userId].cash -= amount;
   userData[userId].bankBalance = currentBank + amount;
   await saveUserData();
+  await updateQuestProgress(userId, interaction.guildId, 'bankDeposit', 1);
 
   const finalCapacity = await calculateBankCapacity(userId);
   const expansions = userData[userId].bankExpansions || 0;
@@ -3522,6 +3736,7 @@ async function handleStealCommand(interaction, userId) {
     cooldowns.steal[userId] = now;
     await saveUserData();
     await saveCooldowns();
+    await updateQuestProgress(userId, interaction.guildId, 'stealSuccess', 1);
 
     const successEmbed = new EmbedBuilder()
       .setTitle('Theft Successful')
@@ -3645,6 +3860,14 @@ async function handleScavengeCommand(interaction, userId) {
   await saveUserData();
   await saveCooldowns();
 
+  await updateQuestProgress(userId, interaction.guildId, 'scavenge', 1);
+  if (['3-Star', '4-Star', '5-Star'].includes(selectedRarity.name)) {
+    await updateQuestProgress(userId, interaction.guildId, 'find3StarPlus', 1);
+  }
+  if (isShiny) {
+    await updateQuestProgress(userId, interaction.guildId, 'findShiny', 1);
+  }
+
   // Check if this find was affected by events
   const eventData = await getEventSystem();
   const event = eventData ? eventData.currentEvent : null;
@@ -3722,6 +3945,7 @@ async function handleLaborCommand(interaction, userId) {
   cooldowns.labor[userId] = now;
 
   await saveUserData();
+  await updateQuestProgress(userId, interaction.guildId, 'labor', 1);
   await saveCooldowns();
 
   const laborEmbed = new EmbedBuilder()
@@ -4581,6 +4805,7 @@ async function handleMassSellCommand(interaction, userId) {
 
       user.cash += grandTotal;
       await saveUser(userId);
+      await updateQuestProgress(userId, interaction.guildId, 'sellArtefact', 1);
       collector.stop('sold');
       delete global.massSellSessions[sessionId];
 
@@ -5293,6 +5518,7 @@ async function handleComponentInteraction(interaction) {
     userData[userId].cash += cashEarned;
     userData[userId].xpData.xp = 0;
     await saveUserData();
+    await updateQuestProgress(userId, interaction.guildId, 'convertXp', 1);
 
     const successEmbed = new EmbedBuilder()
       .setTitle('XP Conversion Successful')
@@ -5375,6 +5601,123 @@ async function handleComponentInteraction(interaction) {
   } else if (customId.startsWith('fish_reel_')) {
     const sessionId = customId.replace('fish_reel_', '');
     await handleReelIn(interaction, sessionId);
+
+  } else if (customId.startsWith('quest_claim_community_')) {
+    const guildId = customId.replace('quest_claim_community_', '');
+    const claimerId = interaction.user.id;
+    const community = await ensureCommunityQuest(guildId);
+
+    if (!community || !community.completed) {
+      return await interaction.reply({ content: '❌ This community quest is not complete yet.', ephemeral: true });
+    }
+    if (!community.contributors.includes(claimerId)) {
+      return await interaction.reply({ content: '❌ You did not contribute to this community quest.', ephemeral: true });
+    }
+    if (community.claimedBy.includes(claimerId)) {
+      return await interaction.reply({ content: '✅ You already claimed this reward.', ephemeral: true });
+    }
+
+    const claimerUser = await getUser(claimerId);
+    claimerUser.cash += community.cashReward;
+    if (!claimerUser.xpData) claimerUser.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
+    claimerUser.xpData.xp += community.xpReward;
+    await saveUser(claimerId);
+
+    community.claimedBy.push(claimerId);
+    await guildSettingsCollection.updateOne({ _id: guildId }, { $set: { communityQuest: community } });
+
+    await interaction.reply({
+      content: `🎁 You claimed **$${community.cashReward.toLocaleString()} + ${community.xpReward} XP** from the community quest!`,
+      ephemeral: true
+    });
+
+  } else if (customId.startsWith('quest_claim_full_')) {
+    const ownerId = customId.replace('quest_claim_full_', '');
+    if (interaction.user.id !== ownerId) {
+      return await interaction.reply({ content: '❌ These are not your quests to claim.', ephemeral: true });
+    }
+    const user = await getUser(ownerId);
+    const dq = ensureDailyQuests(user);
+
+    if (dq.fullClearBonus) {
+      return await interaction.reply({ content: '✅ You already claimed the full-clear bonus.', ephemeral: true });
+    }
+    if (!dq.quests.every(q => q.claimed)) {
+      return await interaction.reply({ content: '❌ Claim all 9 quest rewards first!', ephemeral: true });
+    }
+
+    dq.fullClearBonus = true;
+    user.cash += QUEST_FULL_CLEAR_BONUS_CASH;
+    if (!user.xpData) user.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
+    user.xpData.xp += QUEST_FULL_CLEAR_BONUS_XP;
+    await saveUser(ownerId);
+
+    const guildIdForCommunity = interaction.guildId;
+    const community = guildIdForCommunity ? await ensureCommunityQuest(guildIdForCommunity) : null;
+    if (community) community._guildId = guildIdForCommunity;
+    const { embed, components } = buildQuestsPayload(user, dq, community, ownerId);
+    await interaction.update({ embeds: [embed], components });
+
+  } else if (customId.startsWith('quest_claim_section_')) {
+    const rest = customId.replace('quest_claim_section_', '');
+    const [section, ownerId] = rest.split('|');
+    if (interaction.user.id !== ownerId) {
+      return await interaction.reply({ content: '❌ These are not your quests to claim.', ephemeral: true });
+    }
+    const user = await getUser(ownerId);
+    const dq = ensureDailyQuests(user);
+
+    if (dq.sectionBonuses[section]) {
+      return await interaction.reply({ content: '✅ You already claimed this section bonus.', ephemeral: true });
+    }
+    const sectionQuests = dq.quests.filter(q => q.section === section);
+    if (!sectionQuests.every(q => q.claimed)) {
+      return await interaction.reply({ content: '❌ Claim all quests in this section first!', ephemeral: true });
+    }
+
+    dq.sectionBonuses[section] = true;
+    user.cash += QUEST_SECTION_BONUS_CASH;
+    if (!user.xpData) user.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
+    user.xpData.xp += QUEST_SECTION_BONUS_XP;
+    await saveUser(ownerId);
+
+    const guildIdForCommunity = interaction.guildId;
+    const community = guildIdForCommunity ? await ensureCommunityQuest(guildIdForCommunity) : null;
+    if (community) community._guildId = guildIdForCommunity;
+    const { embed, components } = buildQuestsPayload(user, dq, community, ownerId);
+    await interaction.update({ embeds: [embed], components });
+
+  } else if (customId.startsWith('quest_claim_')) {
+    const rest = customId.replace('quest_claim_', '');
+    const [ownerId, questId] = rest.split('|');
+    if (interaction.user.id !== ownerId) {
+      return await interaction.reply({ content: '❌ These are not your quests to claim.', ephemeral: true });
+    }
+    const user = await getUser(ownerId);
+    const dq = ensureDailyQuests(user);
+    const quest = dq.quests.find(q => q.id === questId);
+
+    if (!quest) {
+      return await interaction.reply({ content: '❌ This quest could not be found (it may have reset).', ephemeral: true });
+    }
+    if (quest.claimed) {
+      return await interaction.reply({ content: '✅ You already claimed this reward.', ephemeral: true });
+    }
+    if (!quest.completed) {
+      return await interaction.reply({ content: '❌ This quest is not complete yet.', ephemeral: true });
+    }
+
+    quest.claimed = true;
+    user.cash += quest.cashReward;
+    if (!user.xpData) user.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
+    user.xpData.xp += quest.xpReward;
+    await saveUser(ownerId);
+
+    const guildIdForCommunity = interaction.guildId;
+    const community = guildIdForCommunity ? await ensureCommunityQuest(guildIdForCommunity) : null;
+    if (community) community._guildId = guildIdForCommunity;
+    const { embed, components } = buildQuestsPayload(user, dq, community, ownerId);
+    await interaction.update({ embeds: [embed], components });
 
   }
 
@@ -6032,6 +6375,9 @@ async function executeTrade(interaction, trade, tradeId) {
 
     await interaction.update({ embeds: [successEmbed], components: [] });
 
+    await updateQuestProgress(trade.initiator, interaction.guildId, 'tradeComplete', 1);
+    await updateQuestProgress(trade.recipient, interaction.guildId, 'tradeComplete', 1);
+
     // Best-effort: close any open ephemeral picker messages now that the
     // trade has resolved (Cancel does the same — completion shouldn't differ).
     await closeTradePickers(trade, 'Trade Complete', 'This trade has been completed.', 0x00FF7F);
@@ -6280,6 +6626,18 @@ async function handleReelIn(interaction, sessionId) {
     userData[userId].artefacts.push(artefactDrop);
     if (!userData[userId].discoveredArtefacts.includes(artefactDrop)) {
       userData[userId].discoveredArtefacts.push(artefactDrop);
+    }
+  }
+
+  await updateQuestProgress(userId, interaction.guildId, 'fish', 1);
+  if (artefactDrop) {
+    const dropIsShiny = artefactDrop.startsWith('✨ SHINY ') && artefactDrop.endsWith(' ✨');
+    const dropRarity = getRarityByArtefact(artefactDrop);
+    if (dropRarity && ['3-Star', '4-Star', '5-Star'].includes(dropRarity.name)) {
+      await updateQuestProgress(userId, interaction.guildId, 'find3StarPlus', 1);
+    }
+    if (dropIsShiny) {
+      await updateQuestProgress(userId, interaction.guildId, 'findShiny', 1);
     }
   }
   await saveUserData();
@@ -6999,6 +7357,7 @@ async function handleMarbleDuel(interaction) {
   const gameId = `duel_${userId}_${Date.now()}`;
   global.activeDuelGames[gameId] = {
     gameId,
+    guildId: interaction.guildId || null,
     players: [interaction.user, opponent], // [0]=P1 initiator, [1]=P2 opponent
     pendingBets: {},
     betAmount: 0,
@@ -7545,6 +7904,7 @@ async function endDuelGame(gameId) {
   await getUser(winner.id);
   userData[winner.id].cash += game.totalPot;
   await saveUserData();
+  await updateQuestProgress(winner.id, game.guildId, 'duelWin', 1);
 
   const duration = Math.max(1, Math.round((Date.now() - game.createdAt) / 60000));
 
@@ -8576,6 +8936,129 @@ async function handleCollectionCommand(interaction, userId) {
   await interaction.reply({ embeds: [embed], components });
 }
 
+function buildQuestsPayload(user, dq, community, userId) {
+  const sectionEmojis = { action: '⚔️', economy: '💰', social: '💬' };
+  const sections = ['action', 'economy', 'social'];
+  const lines = [];
+
+  for (const section of sections) {
+    const sectionQuests = dq.quests.filter(q => q.section === section);
+    const label = section.charAt(0).toUpperCase() + section.slice(1);
+    lines.push(`**${sectionEmojis[section]} ${label}**${dq.sectionBonuses[section] ? ' 🏅 *(bonus claimed)*' : ''}`);
+    for (const q of sectionQuests) {
+      let check = '▫️';
+      if (q.claimed) check = '💰';
+      else if (q.completed) check = '✅';
+      lines.push(`${check} ${q.label} — ${q.progress}/${q.target} (${q.desc}) · $${q.cashReward.toLocaleString()} + ${q.xpReward} XP`);
+    }
+    lines.push('\u200b');
+  }
+
+  const completedCount = dq.quests.filter(q => q.completed).length;
+  const claimedCount = dq.quests.filter(q => q.claimed).length;
+
+  const embed = new EmbedBuilder()
+    .setTitle('📋 Daily Quests')
+    .setDescription(lines.join('\n'))
+    .addFields(
+      { name: 'Progress', value: `${completedCount}/9 complete · ${claimedCount}/9 claimed${dq.fullClearBonus ? ' 🏆 **FULL CLEAR!**' : ''}`, inline: false }
+    )
+    .setColor(0x339AF0)
+    .setFooter({ text: '✅ Ready  ·  💰 Claimed  ·  ▫️ In progress  ·  Quests reset daily' })
+    .setTimestamp();
+
+  if (community) {
+    const commStatus = community.completed ? '✅ Completed!' : `${community.progress}/${community.target}`;
+    const alreadyClaimed = community.claimedBy && community.claimedBy.includes(userId);
+    embed.addFields({
+      name: `🌍 Server Quest: ${community.label}`,
+      value: `${community.desc}\nProgress: ${commStatus}\nReward per contributor: $${community.cashReward.toLocaleString()} + ${community.xpReward} XP` +
+        (community.contributors.includes(userId) ? (alreadyClaimed ? '\n💰 *You already claimed your reward.*' : '\n*You have contributed today!*') : ''),
+      inline: false
+    });
+  }
+
+  const components = [];
+  for (const section of sections) {
+    const sectionQuests = dq.quests.filter(q => q.section === section);
+    const row = new ActionRowBuilder().addComponents(
+      sectionQuests.map(q => {
+        let style = ButtonStyle.Secondary;
+        let label = `▫️ ${q.label}`;
+        let disabled = true;
+        if (q.claimed) {
+          style = ButtonStyle.Secondary;
+          label = `💰 Claimed`;
+          disabled = true;
+        } else if (q.completed) {
+          style = ButtonStyle.Success;
+          label = `✅ Claim: ${q.label}`;
+          disabled = false;
+        }
+        return new ButtonBuilder()
+          .setCustomId(`quest_claim_${userId}|${q.id}`)
+          .setLabel(label.length > 80 ? label.slice(0, 77) + '...' : label)
+          .setStyle(style)
+          .setDisabled(disabled);
+      })
+    );
+    components.push(row);
+  }
+
+  const bonusRow = new ActionRowBuilder().addComponents(
+    sections.map(section => {
+      const sectionQuests = dq.quests.filter(q => q.section === section);
+      const allClaimed = sectionQuests.every(q => q.claimed);
+      const claimedBonus = dq.sectionBonuses[section];
+      return new ButtonBuilder()
+        .setCustomId(`quest_claim_section_${section}|${userId}`)
+        .setLabel(claimedBonus ? `🏅 ${section} bonus claimed` : `🎯 Claim ${section} bonus`)
+        .setStyle(claimedBonus ? ButtonStyle.Secondary : ButtonStyle.Primary)
+        .setDisabled(claimedBonus || !allClaimed);
+    })
+  );
+  components.push(bonusRow);
+
+  const finalRowButtons = [
+    new ButtonBuilder()
+      .setCustomId(`quest_claim_full_${userId}`)
+      .setLabel(dq.fullClearBonus ? '🏆 Full Clear Bonus Claimed' : '🏆 Claim Full Clear Bonus')
+      .setStyle(dq.fullClearBonus ? ButtonStyle.Secondary : ButtonStyle.Success)
+      .setDisabled(dq.fullClearBonus || !dq.quests.every(q => q.claimed))
+  ];
+
+  if (community) {
+    const alreadyClaimed = community.claimedBy && community.claimedBy.includes(userId);
+    const canClaim = community.completed && community.contributors.includes(userId) && !alreadyClaimed;
+    finalRowButtons.push(
+      new ButtonBuilder()
+        .setCustomId(`quest_claim_community_${community._guildId || ''}`)
+        .setLabel(alreadyClaimed ? '🌍 Server Reward Claimed' : '🌍 Claim Server Reward')
+        .setStyle(alreadyClaimed ? ButtonStyle.Secondary : ButtonStyle.Success)
+        .setDisabled(!canClaim)
+    );
+  }
+
+  components.push(new ActionRowBuilder().addComponents(finalRowButtons));
+
+  return { embed, components };
+}
+
+async function handleQuestsCommand(interaction, userId) {
+  await interaction.deferReply();
+
+  const user = await getUser(userId);
+  const dq = ensureDailyQuests(user);
+  await saveUser(userId);
+
+  const guildId = interaction.guildId;
+  const community = guildId ? await ensureCommunityQuest(guildId) : null;
+  if (community) community._guildId = guildId;
+
+  const { embed, components } = buildQuestsPayload(user, dq, community, userId);
+  await interaction.editReply({ embeds: [embed], components });
+}
+
 async function handleObserveCommand(interaction, observerId) {
   const targetDiscordUser = interaction.options.getUser('player');
   const targetId = targetDiscordUser.id;
@@ -8616,6 +9099,7 @@ async function handleObserveCommand(interaction, observerId) {
   }
 
   // Pull live data
+  await updateQuestProgress(observerId, interaction.guildId, 'observeUsed', 1);
   const bankCapacity = await calculateBankCapacity(targetId);
   const totalWealth = target.cash + (target.bankBalance || 0);
 
@@ -8879,6 +9363,7 @@ async function handleCardDuelCommand(interaction) {
   const gameId = `cduel_${userId}_${Date.now()}`;
   global.activeCardDuelGames[gameId] = {
     gameId,
+    guildId: interaction.guildId || null,
     players: [interaction.user, opponent],
     bet,
     totalPot: bet * 2,
@@ -9189,6 +9674,7 @@ async function endCardDuelGame(game) {
     const winnerData = await getUser(p1.id);
     winnerData.cash += game.totalPot;
     await saveUser(p1.id);
+    await updateQuestProgress(p1.id, game.guildId, 'duelWin', 1);
     resultTitle = `🏆 ${p1.displayName} Wins the Card Duel!`;
     resultDesc = `**${p1.displayName}** takes the pot of **$${game.totalPot.toLocaleString()}**!`;
     color = 0xFFD700;
@@ -9196,6 +9682,7 @@ async function endCardDuelGame(game) {
     const winnerData = await getUser(p2.id);
     winnerData.cash += game.totalPot;
     await saveUser(p2.id);
+    await updateQuestProgress(p2.id, game.guildId, 'duelWin', 1);
     resultTitle = `🏆 ${p2.displayName} Wins the Card Duel!`;
     resultDesc = `**${p2.displayName}** takes the pot of **$${game.totalPot.toLocaleString()}**!`;
     color = 0xFFD700;
