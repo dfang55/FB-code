@@ -868,15 +868,24 @@ const DAILY_QUEST_SOCIAL_POOL = [
 ];
 
 const COMMUNITY_QUEST_POOL = [
-  { id: 'comm_scavenge', track: 'scavenge', target: 50, label: 'Community Mining Spree', desc: 'Scavenge 50 times as a server today.', cashReward: 150, xpReward: 3 },
-  { id: 'comm_labor', track: 'labor', target: 40, label: 'All Hands on Deck', desc: 'Complete 40 labor shifts as a server today.', cashReward: 150, xpReward: 3 },
-  { id: 'comm_sell', track: 'sellArtefact', target: 30, label: 'Market Day', desc: 'Sell 30 artefacts as a server today.', cashReward: 150, xpReward: 3 },
-  { id: 'comm_messages', track: 'sendMessage', target: 150, label: 'Server Chatter', desc: 'Send 150 messages as a server today.', cashReward: 100, xpReward: 2 },
-  { id: 'comm_trade', track: 'tradeComplete', target: 15, label: 'Trading Frenzy', desc: 'Complete 15 trades as a server today.', cashReward: 200, xpReward: 4 }
+  { id: 'comm_scavenge', track: 'scavenge', target: 400, label: 'Community Mining Spree', desc: 'Scavenge 400 times as a server this week.', cashReward: 600, xpReward: 12 },
+  { id: 'comm_labor', track: 'labor', target: 300, label: 'All Hands on Deck', desc: 'Complete 300 labor shifts as a server this week.', cashReward: 600, xpReward: 12 },
+  { id: 'comm_sell', track: 'sellArtefact', target: 250, label: 'Market Day', desc: 'Sell 250 artefacts as a server this week.', cashReward: 600, xpReward: 12 },
+  { id: 'comm_messages', track: 'sendMessage', target: 1200, label: 'Server Chatter', desc: 'Send 1,200 messages as a server this week.', cashReward: 400, xpReward: 8 },
+  { id: 'comm_trade', track: 'tradeComplete', target: 100, label: 'Trading Frenzy', desc: 'Complete 100 trades as a server this week.', cashReward: 800, xpReward: 16 }
 ];
 
 function getTodayDateKey() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function getWeekDateKey() {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${weekNo}`;
 }
 
 function pickRandomQuests(pool, count) {
@@ -924,19 +933,44 @@ function ensureDailyQuests(user) {
 
 async function ensureCommunityQuest(guildId) {
   if (!guildId || !guildSettingsCollection) return null;
-  const today = getTodayDateKey();
+  const weekKey = getWeekDateKey();
   const doc = await guildSettingsCollection.findOne({ _id: guildId });
   const existing = doc && doc.communityQuest;
-  if (existing && existing.date === today) return existing;
+  if (existing && existing.weekKey === weekKey) return existing;
 
   const template = COMMUNITY_QUEST_POOL[Math.floor(Math.random() * COMMUNITY_QUEST_POOL.length)];
   const fresh = {
-    date: today, id: template.id, track: template.track, label: template.label, desc: template.desc,
+    weekKey, id: template.id, track: template.track, label: template.label, desc: template.desc,
     target: template.target, progress: 0, contributors: [], completed: false, claimedBy: [],
     cashReward: template.cashReward, xpReward: template.xpReward
   };
   await guildSettingsCollection.updateOne({ _id: guildId }, { $set: { communityQuest: fresh } }, { upsert: true });
+  await announceNewCommunityQuest(guildId, fresh);
   return fresh;
+}
+
+async function announceNewCommunityQuest(guildId, community) {
+  try {
+    const channelId = await getAnnouncementChannelId(guildId);
+    if (!channelId) return;
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🌍 New Weekly Server Quest!')
+      .setDescription(`This week's community goal: **${community.label}**\n${community.desc}`)
+      .addFields(
+        { name: 'Target', value: `${community.target.toLocaleString()}`, inline: true },
+        { name: 'Reward (per contributor)', value: `$${community.cashReward.toLocaleString()} + ${community.xpReward} XP`, inline: true }
+      )
+      .setColor(0x3498DB)
+      .setFooter({ text: 'Everyone who contributes can claim a reward once the goal is reached. Resets weekly!' })
+      .setTimestamp();
+
+    await channel.send({ embeds: [embed] });
+  } catch (err) {
+    console.error('announceNewCommunityQuest error:', err);
+  }
 }
 
 async function dmQuestCompletion(userId, quest) {
@@ -967,13 +1001,13 @@ async function announceCommunityQuestComplete(guildId, community) {
 
     const embed = new EmbedBuilder()
       .setTitle('🌍 Server Quest Complete!')
-      .setDescription(`The server has completed today's community goal: **${community.label}**!\n${community.desc}\n\nContributors can claim their reward below.`)
+      .setDescription(`The server has completed this week's community goal: **${community.label}**!\n${community.desc}\n\nContributors can claim their reward below.`)
       .addFields(
         { name: 'Contributors', value: `${community.contributors.length} player(s)`, inline: true },
         { name: 'Reward (each)', value: `$${community.cashReward.toLocaleString()} + ${community.xpReward} XP`, inline: true }
       )
       .setColor(0x1ABC9C)
-      .setFooter({ text: 'A new community quest will appear tomorrow!' })
+      .setFooter({ text: 'A new community quest will appear next week!' })
       .setTimestamp();
 
     const claimRow = new ActionRowBuilder().addComponents(
@@ -1744,7 +1778,7 @@ client.once('clientReady', async () => {
 
     new SlashCommandBuilder()
       .setName('quests')
-      .setDescription('View your daily quests and the server community quest'),
+      .setDescription('View your daily quests and the server\'s weekly community quest'),
 
     new SlashCommandBuilder()
       .setName('give-roles')
@@ -8964,16 +8998,16 @@ function buildQuestsPayload(user, dq, community, userId) {
       { name: 'Progress', value: `${completedCount}/9 complete · ${claimedCount}/9 claimed${dq.fullClearBonus ? ' 🏆 **FULL CLEAR!**' : ''}`, inline: false }
     )
     .setColor(0x339AF0)
-    .setFooter({ text: '✅ Ready  ·  💰 Claimed  ·  ▫️ In progress  ·  Quests reset daily' })
+    .setFooter({ text: '✅ Ready  ·  💰 Claimed  ·  ▫️ In progress  ·  Personal quests reset daily' })
     .setTimestamp();
 
   if (community) {
-    const commStatus = community.completed ? '✅ Completed!' : `${community.progress}/${community.target}`;
+    const commStatus = community.completed ? '✅ Completed!' : `${community.progress.toLocaleString()}/${community.target.toLocaleString()}`;
     const alreadyClaimed = community.claimedBy && community.claimedBy.includes(userId);
     embed.addFields({
-      name: `🌍 Server Quest: ${community.label}`,
+      name: `🌍 Weekly Server Quest: ${community.label}`,
       value: `${community.desc}\nProgress: ${commStatus}\nReward per contributor: $${community.cashReward.toLocaleString()} + ${community.xpReward} XP` +
-        (community.contributors.includes(userId) ? (alreadyClaimed ? '\n💰 *You already claimed your reward.*' : '\n*You have contributed today!*') : ''),
+        (community.contributors.includes(userId) ? (alreadyClaimed ? '\n💰 *You already claimed your reward.*' : '\n*You have contributed this week!*') : ''),
       inline: false
     });
   }
