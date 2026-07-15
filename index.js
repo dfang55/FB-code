@@ -169,17 +169,17 @@ const BAIT_CATALOG = {
   'Earthworm': {
     name: 'Earthworm', basePrice: 150, type: 'bait', category: 'minigame', emoji: '🪱',
     description: 'A humble worm dug from the riverbank. Great for lazy afternoons. Attracts mostly common catches.',
-    weights: { junk: 30, common: 50, uncommon: 15, rare: 4, legendary: 1 }
+    weights: { junk: 55, common: 28, uncommon: 12, rare: 4, legendary: 1 }
   },
   'Cricket': {
     name: 'Cricket', basePrice: 400, type: 'bait', category: 'minigame', emoji: '🦗',
     description: 'Lively bait that attracts livelier fish. Noticeably better odds on uncommon catches.',
-    weights: { junk: 15, common: 40, uncommon: 30, rare: 12, legendary: 3 }
+    weights: { junk: 35, common: 27, uncommon: 25, rare: 10, legendary: 3 }
   },
   'Salted Lure': {
     name: 'Salted Lure', basePrice: 900, type: 'bait', category: 'minigame', emoji: '🎣',
     description: 'A handcrafted saltwater lure. Rare fish can\'t seem to resist the shimmer.',
-    weights: { junk: 5, common: 30, uncommon: 35, rare: 22, legendary: 8 }
+    weights: { junk: 18, common: 15, uncommon: 37, rare: 22, legendary: 8 }
   },
   'Gilded Hook': {
     name: 'Gilded Hook', basePrice: 2000, type: 'bait', category: 'minigame', emoji: '🪝',
