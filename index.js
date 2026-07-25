@@ -1860,6 +1860,20 @@ client.once('clientReady', async () => {
           .setRequired(true)),
 
     new SlashCommandBuilder()
+      .setName('add-money')
+      .setDescription('Add cash to a user (Developer only)')
+      .setDefaultMemberPermissions(0)
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to add cash to')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount of cash to add')
+          .setRequired(true)
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
       .setName('give-cash')
       .setDescription('Give cash to a user (Developer only)')
       .setDefaultMemberPermissions(0)
@@ -2440,6 +2454,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'give-cash':
         await handleGiveCashCommand(interaction);
+        break;
+
+      case 'add-money':
+        await handleAddMoneyCommand(interaction);
         break;
 
       case 'setevent':
@@ -8138,15 +8156,16 @@ function buildGiveArtefactEmbed(session) {
         const tierSell = calcArtefactSellValue(e.name, rarity);
         return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} T${tier} ($${(tierSell * e.amount).toLocaleString()} total)`;
       }).join('\n')
-    : 'Nothing queued yet — select an artefact and add it below.';
+    : 'Nothing queued yet — pick a rarity, select an artefact, then add it below.';
 
   const totalItems = session.queue.reduce((s, e) => s + e.amount, 0);
 
   return new EmbedBuilder()
     .setTitle(`Give Artefacts to ${session.targetDisplayName}`)
-    .setDescription('Select an artefact from the dropdown, then use the buttons to queue it. Confirm when your list is ready.')
+    .setDescription('**Step 1:** Choose a rarity tier.\n**Step 2:** Pick an artefact from that tier.\n**Step 3:** Add to queue and confirm.')
     .addFields(
-      { name: 'Currently Selected', value: session.selectedArtefact || 'None — pick from the dropdown below', inline: false },
+      { name: 'Selected Rarity', value: session.selectedRarity || 'None — pick a rarity below', inline: true },
+      { name: 'Selected Artefact', value: session.selectedArtefact || 'None — pick an artefact below', inline: true },
       { name: `Queue (${totalItems} artefact${totalItems !== 1 ? 's' : ''})`, value: queueText, inline: false }
     )
     .setColor(session.queue.length > 0 ? 0x51CF66 : 0x339AF0)
@@ -8155,25 +8174,44 @@ function buildGiveArtefactEmbed(session) {
 }
 
 function buildGiveArtefactComponents(sessionId, session) {
-  const allArtefacts = rarities.flatMap(r => r.items.map(item => ({ item, rarity: r })));
-  const selectOptions = allArtefacts.slice(0, 25).map(({ item, rarity }) => {
-    const tier = getArtefactTier(item);
-    const tierSell = calcArtefactSellValue(item, rarity);
-    return {
-      label: item,
-      description: `${rarity.name} T${tier} — $${tierSell.toLocaleString()} sell value`,
-      value: item,
-      default: session.selectedArtefact === item
-    };
-  });
+  // Row 1: Rarity picker
+  const rarityOptions = rarities.map(r => ({
+    label: r.name,
+    description: `${r.items.length} artefacts — base sell $${r.sell.toLocaleString()}`,
+    value: r.name,
+    default: session.selectedRarity === r.name
+  }));
 
-  const selectRow = new ActionRowBuilder().addComponents(
+  const rarityRow = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId(`ga_select_${sessionId}`)
-      .setPlaceholder('Select an artefact to queue')
-      .addOptions(selectOptions)
+      .setCustomId(`ga_rarity_${sessionId}`)
+      .setPlaceholder('Step 1 — Select a rarity tier')
+      .addOptions(rarityOptions)
   );
 
+  // Row 2: Artefact picker (filtered by selected rarity)
+  const selectedRarityData = rarities.find(r => r.name === session.selectedRarity);
+  const artefactRow = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`ga_select_${sessionId}`)
+      .setPlaceholder(session.selectedRarity ? `Step 2 — Select a ${session.selectedRarity} artefact` : 'Step 2 — Pick a rarity first')
+      .setDisabled(!selectedRarityData)
+      .addOptions(selectedRarityData
+        ? selectedRarityData.items.map(item => {
+            const tier = getArtefactTier(item);
+            const tierSell = calcArtefactSellValue(item, selectedRarityData);
+            return {
+              label: item,
+              description: `T${tier} — $${tierSell.toLocaleString()} sell value`,
+              value: item,
+              default: session.selectedArtefact === item
+            };
+          })
+        : [{ label: 'No rarity selected', value: '_placeholder', default: false }]
+      )
+  );
+
+  // Row 3: Action buttons
   const hasSelection = !!session.selectedArtefact;
   const hasQueue = session.queue.length > 0;
   const totalItems = session.queue.reduce((s, e) => s + e.amount, 0);
@@ -8205,7 +8243,7 @@ function buildGiveArtefactComponents(sessionId, session) {
       .setStyle(ButtonStyle.Danger)
   );
 
-  return [selectRow, buttonRow];
+  return [rarityRow, artefactRow, buttonRow];
 }
 
 async function handleGiveArtefactCommand(interaction) {
@@ -8226,6 +8264,7 @@ async function handleGiveArtefactCommand(interaction) {
     userId: interaction.user.id,
     targetId,
     targetDisplayName: targetUser.displayName,
+    selectedRarity: null,
     selectedArtefact: null,
     queue: [],
     message: null
@@ -8247,7 +8286,12 @@ async function handleGiveArtefactCommand(interaction) {
   });
 
   collector.on('collect', async i => {
-    if (i.customId === `ga_select_${sessionId}`) {
+    if (i.customId === `ga_rarity_${sessionId}`) {
+      session.selectedRarity = i.values[0];
+      session.selectedArtefact = null; // reset artefact when rarity changes
+      await i.update({ embeds: [buildGiveArtefactEmbed(session)], components: buildGiveArtefactComponents(sessionId, session) });
+
+    } else if (i.customId === `ga_select_${sessionId}`) {
       session.selectedArtefact = i.values[0];
       await i.update({ embeds: [buildGiveArtefactEmbed(session)], components: buildGiveArtefactComponents(sessionId, session) });
 
@@ -8366,6 +8410,39 @@ async function handleGiveCashCommand(interaction) {
     .addFields(
       { name: 'Recipient', value: `<@${targetId}>`, inline: true },
       { name: 'Amount Given', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(0x00FF7F)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleAddMoneyCommand(interaction) {
+  if (!isDeveloper(interaction.user.id)) {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder().setTitle('Access Denied').setDescription('This command is restricted to developers only.').setColor(0xFF6B6B).setTimestamp()],
+      ephemeral: true
+    });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const amount = interaction.options.getInteger('amount');
+  const targetId = targetUser.id;
+
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  userData[targetId].cash += amount;
+  await saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Cash Added')
+    .setDescription(`Successfully added **$${amount.toLocaleString()}** to ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+      { name: 'Amount Added', value: `$${amount.toLocaleString()}`, inline: true },
       { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
       { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
     )
