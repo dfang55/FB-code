@@ -369,9 +369,9 @@ async function buildRaidStoreSection(raidSubTab, raidPage, userId) {
         inline: false
       });
       additionalComponents.push(new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_1_p${safePage}`).setLabel(`Buy x1  ($${u.cost.toLocaleString()})`).setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_5_p${safePage}`).setLabel(`Buy x5  ($${(u.cost*5).toLocaleString()})`).setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_10_p${safePage}`).setLabel(`Buy x10  ($${(u.cost*10).toLocaleString()})`).setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_1_p${safePage}`).setLabel(`${u.name} x1 ($${u.cost.toLocaleString()})`).setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_5_p${safePage}`).setLabel(`${u.name} x5 ($${(u.cost*5).toLocaleString()})`).setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_10_p${safePage}`).setLabel(`${u.name} x10 ($${(u.cost*10).toLocaleString()})`).setStyle(ButtonStyle.Success)
       ));
     }
     const { relative } = calcRaidCP(raidData);
@@ -400,7 +400,7 @@ async function buildRaidStoreSection(raidSubTab, raidPage, userId) {
       additionalComponents.push(new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`raid_train_${u.id}_p${safePage}`)
-          .setLabel(currentLevel < 5 ? `Train -> Lv.${nextLevel}  ($${nextCost.toLocaleString()})` : 'MAX LEVEL')
+          .setLabel(currentLevel < 5 ? `${u.name} -> Lv.${nextLevel}  ($${nextCost.toLocaleString()})` : `${u.name} MAX`)
           .setStyle(currentLevel < 5 ? ButtonStyle.Primary : ButtonStyle.Secondary)
           .setDisabled(currentLevel >= 5)
       ));
