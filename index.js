@@ -5882,17 +5882,18 @@ async function handleComponentInteraction(interaction) {
     const guildId    = interaction.guildId;
     const userId     = interaction.user.id;
     if (!guildId) return await interaction.deferUpdate();
+    await interaction.deferUpdate();
     const [globalItems, guildItemsDoc, raidSeason] = await Promise.all([
       getGlobalItems(),
       guildItemsCollection.findOne({ _id: guildId }),
       getRaidSeason()
     ]);
     if (!raidSeason || !raidSeason.active) {
-      return await interaction.reply({ content: 'The Raid Season is not currently active.', ephemeral: true });
+      return await interaction.followUp({ content: 'The Raid Season is not currently active.', ephemeral: true });
     }
     const guildItems = guildItemsDoc?.items || {};
     const payload = await buildStorePayload('raid', userId, guildId, globalItems, guildItems, raidSeason, raidSubTab, raidPage);
-    await interaction.update(payload);
+    await interaction.editReply(payload);
 
   } else if (customId.startsWith('inv_prev_') || customId.startsWith('inv_next_')) {
     const isPrev = customId.startsWith('inv_prev_');
