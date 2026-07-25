@@ -5937,6 +5937,9 @@ async function handleComponentInteraction(interaction) {
     session.selectedTargetId = interaction.values[0];
     await interaction.update(await buildRaidBrowsePayload(session, sessionId));
 
+  } else if (customId.startsWith('raid_tutorial_')) {
+    await handleRaidTutorialButton(interaction);
+
   } else if (customId.startsWith('raid_page_')) {
     // Format: raid_page_{sessionId}_{page}
     const inner     = customId.replace('raid_page_', '');
@@ -10573,6 +10576,189 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
   }, delay * 1000);
 }
 
+// ============================================================
+// === RAID TUTORIAL ==========================================
+// ============================================================
+
+const RAID_TUTORIAL_PAGES = [
+  {
+    title: 'Welcome to the Raid Season  --  Page 1 of 7',
+    description:
+      `A Raid Season is a **30-day global event** that runs across every server Fortune Bot lives in.\n\n` +
+      `During this time, you can spend your cash to **build an empire** — recruiting soldiers, training them, and hiring mercenaries. ` +
+      `When you feel ready, you can march on a rival and take the fight to them.\n\n` +
+      `At the end of the 30 days, your wins and losses are tallied and **real money changes hands**. ` +
+      `The more raids you complete over the season, the higher the stakes on every single one of them.\n\n` +
+      `Victories pay out. Defeats cost you. Lose badly enough and it will cut into your bank. Lose catastrophically and you go into debt.\n\n` +
+      `**This is not a casual event. Build well or do not build at all.**`,
+    footer: 'Raid Season Tutorial  |  Use the buttons below to navigate'
+  },
+  {
+    title: 'Relative CP vs Actual CP  --  Page 2 of 7',
+    description:
+      `CP stands for **Combat Power**. It decides who wins a raid. There are two kinds, and understanding the difference is the most important thing in this entire tutorial.\n\n` +
+      `**Relative CP** is calculated from the raw number of soldiers you have multiplied by each unit's base CP value. ` +
+      `It is visible to every other player. When someone uses \`/viewcp\` on you or browses \`/raid\`, this is the number they see.\n\n` +
+      `**Actual CP** is calculated the same way — but also factors in your **training levels**. ` +
+      `A well-trained army can have an Actual CP far higher than its Relative CP suggests. ` +
+      `Only you can see your own Actual CP. Your rivals cannot.\n\n` +
+      `When a raid resolves, **only Actual CP is used**. Relative CP is bait.\n\n` +
+      `\`\`\`\n` +
+      `Example:\n` +
+      ` Player A -- Relative CP: 1,200  |  Actual CP: 1,980  (Lv.5 trained)\n` +
+      ` Player B -- Relative CP: 1,500  |  Actual CP: 1,500  (untrained)\n` +
+      ` Result: Player A wins despite appearing weaker on paper.\n` +
+      `\`\`\``,
+    footer: 'Raid Season Tutorial  |  Training is your hidden advantage'
+  },
+  {
+    title: 'Building Your Military  --  Page 3 of 7',
+    description:
+      `Open \`/store\` during an active season and you will find a **[ RAID SEASON ]** tab.\n\n` +
+      `Inside, the **Buy Military** sub-tab lists every unit type available to recruit. Each unit has a cost and a base CP value:\n\n` +
+      `\`\`\`\n` +
+      ` ( o )  Peasant Levy      $100   |  8 CP\n` +
+      ` ( o )  Crossbowman       $350   |  18 CP\n` +
+      ` ( o )  Spearman          $300   |  15 CP\n` +
+      ` { o }  Man-at-Arms       $600   |  28 CP\n` +
+      ` ( o )  Squire            $500   |  22 CP\n` +
+      ` [_o_]  Sergeant          $900   |  40 CP\n` +
+      ` [#o#]  Knight            $2,000 |  90 CP\n` +
+      ` ( o )  Cavalry           $1,800 |  75 CP\n` +
+      ` ( o )  Siege Engineer    $1,500 |  60 CP\n` +
+      ` (***)  Battle Mage       $3,000 | 130 CP\n` +
+      `\`\`\`\n\n` +
+      `You can buy in quantities of 1, 5, or 10 at a time. Costs come directly from your cash on hand. ` +
+      `More soldiers means more Relative CP — and more Actual CP once you start training.`,
+    footer: 'Raid Season Tutorial  |  Quality beats quantity once training is involved'
+  },
+  {
+    title: 'Training Your Units  --  Page 4 of 7',
+    description:
+      `The **Training** sub-tab in \`/store\` lets you level up each unit type from **Level 1 to Level 5**.\n\n` +
+      `Training does not affect Relative CP at all — it only increases Actual CP. That is the point. ` +
+      `Your rivals see your Relative CP and think they know what they're facing. They don't.\n\n` +
+      `\`\`\`\n` +
+      ` Level 1  -- x1.00  (base, no bonus)\n` +
+      ` Level 2  -- x1.20  (+20% CP)   cost: $800\n` +
+      ` Level 3  -- x1.40  (+40% CP)   cost: $2,500\n` +
+      ` Level 4  -- x1.65  (+65% CP)   cost: $7,000\n` +
+      ` Level 5  -- x2.00  (+100% CP)  cost: $18,000\n` +
+      `\`\`\`\n\n` +
+      `Training costs apply **per unit type**, not per soldier. So if you have 50 Knights and train them to Level 5, ` +
+      `you pay $18,000 once and all 50 Knights benefit.\n\n` +
+      `A fully trained Battle Mage has **260 Actual CP** each while showing only 130 Relative CP to enemies. ` +
+      `Train the expensive units. It compounds fast.`,
+    footer: 'Raid Season Tutorial  |  Training costs are one-time per unit type'
+  },
+  {
+    title: 'Mercenaries  --  Page 5 of 7',
+    description:
+      `The **Mercenaries** sub-tab in \`/store\` lets you hire **Sellsword Captains**.\n\n` +
+      `\`\`\`\n` +
+      ` (XoX)\n` +
+      ` /|\\/|     Sellsword Captain\n` +
+      `  / \\      $5,000 per hire  |  +250 Actual CP\n` +
+      `\`\`\`\n\n` +
+      `A Sellsword Captain does not contribute to your standing Relative CP — they do not show up in \`/viewcp\` for other players. ` +
+      `But when you launch a raid and choose to deploy one, they add **+250 Actual CP for that battle only**.\n\n` +
+      `After the raid ends — win or lose — the captain is gone. You must hire again for the next one.\n\n` +
+      `**When to use them:** Deploy a captain when you are raiding someone whose Actual CP you suspect is higher than their Relative CP suggests. ` +
+      `A captain can turn a losing fight into a winning one. You can also hold them back and let opponents underestimate you — then deploy on a fight that matters.\n\n` +
+      `You can hold multiple captains on retainer. Spend wisely.`,
+    footer: 'Raid Season Tutorial  |  Captains are single-use — deploy with intention'
+  },
+  {
+    title: 'Raiding  --  Page 6 of 7',
+    description:
+      `When your army is built, run \`/raid\`.\n\n` +
+      `You will see a list of all active participants — their name, Relative CP, known military, and season record. ` +
+      `Training levels and Actual CP are hidden from you. Choose wisely.\n\n` +
+      `Select a target from the dropdown. You will see two buttons:\n` +
+      `- **Launch Raid** — sends your army as-is\n` +
+      `- **Launch Raid + Deploy Captain** — sends your army with a Sellsword Captain attached (costs one captain)\n\n` +
+      `Once you confirm, a battle embed appears in the channel. After **10 to 20 seconds**, both Actual CPs are compared and the higher one wins. ` +
+      `Both you and your target are sent a DM with the result and your projected payout.\n\n` +
+      `**Rules:**\n` +
+      `- You can only raid each player **once per season** — no farming the same target\n` +
+      `- Offline players can be raided; they will be notified by DM\n` +
+      `- Actual CP is revealed only at resolution — not before`,
+    footer: 'Raid Season Tutorial  |  You cannot raid the same empire twice this season'
+  },
+  {
+    title: 'Season-End Payouts  --  Page 7 of 7',
+    description:
+      `No money changes hands during the season. Wins and losses are **tracked**, not paid out immediately.\n\n` +
+      `When the season ends, every player's results are settled at once using this formula:\n\n` +
+      `\`\`\`\n` +
+      ` Rate per win/loss = min(raids you completed x $500, $5,000)\n\n` +
+      ` Net change = (your victories x rate) - (your losses x rate)\n` +
+      `\`\`\`\n\n` +
+      `The more raids you complete over the season, the more each individual win and loss is worth. ` +
+      `Someone who raids twice risks $1,000 per result. Someone who raids ten times risks $5,000 per result — the maximum.\n\n` +
+      `**Consequences:**\n` +
+      `- Positive net: cash added to your wallet\n` +
+      `- Negative net: deducted from cash, then from your bank if cash runs out\n` +
+      `- If your bank is also drained: you go into debt\n\n` +
+      `All armies are disbanded when the season closes. Training is erased. The next season, everyone starts from nothing.\n\n` +
+      `**You are ready. Open \`/store\` and start building.**`,
+    footer: 'Raid Season Tutorial  |  All army data resets when the season ends'
+  }
+];
+
+function buildRaidTutorialPayload(page) {
+  const safePage = Math.max(0, Math.min(page, RAID_TUTORIAL_PAGES.length - 1));
+  const data     = RAID_TUTORIAL_PAGES[safePage];
+  const isFirst  = safePage === 0;
+  const isLast   = safePage === RAID_TUTORIAL_PAGES.length - 1;
+
+  const embed = new EmbedBuilder()
+    .setTitle(data.title)
+    .setDescription(data.description)
+    .setColor(0x8B0000)
+    .setFooter({ text: data.footer })
+    .setTimestamp();
+
+  const btns = [];
+  if (!isFirst) {
+    btns.push(new ButtonBuilder().setCustomId(`raid_tutorial_${safePage - 1}`).setLabel('< Back').setStyle(ButtonStyle.Secondary));
+  }
+  if (!isLast) {
+    btns.push(new ButtonBuilder().setCustomId(`raid_tutorial_${safePage + 1}`).setLabel('Next >').setStyle(ButtonStyle.Primary));
+  } else {
+    btns.push(new ButtonBuilder().setCustomId('raid_tutorial_close').setLabel('Got it. Close this.').setStyle(ButtonStyle.Success));
+  }
+
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(...btns)], ephemeral: true };
+}
+
+async function handleRaidTutorialButton(interaction) {
+  const customId = interaction.customId;
+
+  if (customId === 'raid_tutorial_close') {
+    return await interaction.update({
+      embeds: [new EmbedBuilder()
+        .setTitle('Good luck out there.')
+        .setDescription('Open `/store` to start building your empire.\nUse `/viewcp` to check your CP.\nUse `/raid` when you are ready to march.')
+        .setColor(0x8B0000)
+        .setTimestamp()],
+      components: []
+    });
+  }
+
+  const page = parseInt(customId.replace('raid_tutorial_', ''), 10);
+  if (isNaN(page)) return;
+
+  // First click: interaction.reply (not yet responded to)
+  // Subsequent clicks: interaction.update (already responded)
+  const payload = buildRaidTutorialPayload(page);
+  if (interaction.replied || interaction.deferred) {
+    await interaction.update(payload);
+  } else {
+    await interaction.reply(payload);
+  }
+}
+
 async function handleStartRaidCommand(interaction) {
   if (!isDeveloper(interaction.user.id)) {
     return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Access Denied').setDescription('Developer only.').setColor(0xFF6B6B)], ephemeral: true });
@@ -10611,7 +10797,13 @@ async function handleStartRaidCommand(interaction) {
       const channelId = await getAnnouncementChannelId(guild.id);
       let channel = channelId ? await client.channels.fetch(channelId).catch(() => null) : null;
       if (!channel) channel = guild.channels.cache.filter(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')).sort((a, b) => a.rawPosition - b.rawPosition).first();
-      if (channel) { await channel.send({ embeds: [announcementEmbed] }); broadcast++; }
+      const participateRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('raid_tutorial_0')
+          .setLabel('Start Here -- New to Raiding?')
+          .setStyle(ButtonStyle.Danger)
+      );
+      if (channel) { await channel.send({ embeds: [announcementEmbed], components: [participateRow] }); broadcast++; }
     } catch (e) {}
   }
   console.log(`Raid Season ${seasonId} started — broadcast to ${broadcast} server(s).`);
