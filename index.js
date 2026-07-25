@@ -4540,7 +4540,7 @@ function buildStoreNavRow(activeTab, raidActive = false) {
   ];
   if (raidActive) {
     btns.push(new ButtonBuilder()
-      .setCustomId('store_tab_raid_military_0')
+      .setCustomId('store_tab_raid_open')
       .setLabel('[ RAID SEASON ]')
       .setStyle(activeTab === 'raid' ? ButtonStyle.Danger : ButtonStyle.Secondary));
   }
@@ -5875,10 +5875,15 @@ async function handleComponentInteraction(interaction) {
 
   } else if (customId.startsWith('store_tab_raid_')) {
     // Format: store_tab_raid_{subTab}_{page}  (subTab may contain underscores e.g. man_at_arms — but our sub-tab names are single words)
-    const inner      = customId.replace('store_tab_raid_', '');
-    const lastUnd    = inner.lastIndexOf('_');
-    const raidSubTab = inner.slice(0, lastUnd);   // 'military' | 'training' | 'mercenaries'
-    const raidPage   = parseInt(inner.slice(lastUnd + 1), 10) || 0;
+    // 'store_tab_raid_open' is the top-level nav button — always opens military tab page 0
+    let raidSubTab = 'military';
+    let raidPage   = 0;
+    if (customId !== 'store_tab_raid_open') {
+      const inner  = customId.replace('store_tab_raid_', '');
+      const lastUnd = inner.lastIndexOf('_');
+      raidSubTab   = inner.slice(0, lastUnd);   // 'military' | 'training' | 'mercenaries'
+      raidPage     = parseInt(inner.slice(lastUnd + 1), 10) || 0;
+    }
     const guildId    = interaction.guildId;
     const userId     = interaction.user.id;
     if (!guildId) return await interaction.deferUpdate();
