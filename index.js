@@ -10527,7 +10527,8 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
       const loserActual  = attackerWins ? defenderActual : attackerActual;
 
       if (attackerWins) { attackerData.victories = (attackerData.victories || 0) + 1; defenderData.losses = (defenderData.losses || 0) + 1; }
-      else              { attackerData.losses = (attackerData.losses || 0) + 1; defenderData.victories = (defenderData.victories || 0) + 1; }
+      else              { defenderData.victories = (defenderData.victories || 0) + 1; }
+      // Attacker takes no loss when repelled — they can regroup and the defender can counter-raid
       await Promise.all([saveRaidPlayer(attackerData), saveRaidPlayer(defenderData)]);
 
       const winnerRaidData = attackerWins ? attackerData : defenderData;
@@ -10554,7 +10555,7 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
         .setDescription(`\`\`\`\n${resultLines}\n\`\`\``)
         .addFields(
           { name: 'Victor',   value: `${winnerName}  --  ${winnerRaidData.victories} victory(s) this season`, inline: true },
-          { name: 'Defeated', value: `${loserName}  --  ${loserRaidData.losses} defeat(s) this season`,      inline: true },
+          { name: attackerWins ? 'Defeated' : 'Repelled', value: attackerWins ? `${loserName}  --  ${loserRaidData.losses} defeat(s) this season` : `${loserName}  --  raid repelled, no loss recorded`, inline: true },
           { name: 'Payout Note', value: `Winnings and losses settle at season end. The more raids you complete, the higher the stakes per result.`, inline: false }
         )
         .setColor(attackerWins ? 0x51CF66 : 0xFF6B6B)
@@ -10576,12 +10577,14 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
           { name: 'Projected Payout', value: `+$${winnerPayout.toLocaleString()} at season end  (based on ${winnerRaidData.raidsCompleted} raids completed)`, inline: false }
         ).setColor(0x51CF66).setTimestamp()] }).catch(() => {});
       if (loserUser2) loserUser2.send({ embeds: [new EmbedBuilder()
-        .setTitle('Your empire was defeated.')
-        .setDescription(`**${winnerName}** overwhelmed your forces. The defeat is recorded.`)
+        .setTitle(attackerWins ? 'Your empire was defeated.' : 'Your raid was repelled.')
+        .setDescription(attackerWins
+          ? `**${winnerName}** overwhelmed your forces. The defeat is recorded.`
+          : `**${winnerName}** held their ground and drove your forces back. No loss has been recorded — but they now know your Actual CP.`)
         .addFields(
           { name: 'Your Actual CP', value: loserActual.toLocaleString(), inline: true },
-          { name: 'Attacker',       value: winnerName,                    inline: true },
-          { name: 'Projected Penalty', value: `-$${loserPenalty.toLocaleString()} at season end  (based on ${loserRaidData.raidsCompleted} raids completed)`, inline: false }
+          { name: attackerWins ? 'Attacker' : 'Defender', value: winnerName, inline: true },
+          ...(attackerWins ? [{ name: 'Projected Penalty', value: `-$${loserPenalty.toLocaleString()} at season end  (based on ${loserRaidData.raidsCompleted} raids completed)`, inline: false }] : [])
         ).setColor(0xFF6B6B).setTimestamp()] }).catch(() => {});
 
     } catch (err) { console.error('Raid resolution error:', err); }
@@ -10601,7 +10604,9 @@ const RAID_TUTORIAL_PAGES = [
       `When you feel ready, you can march on a rival and take the fight to them.\n\n` +
       `At the end of the 30 days, your wins and losses are tallied and **real money changes hands**. ` +
       `The more raids you complete over the season, the higher the stakes on every single one of them.\n\n` +
-      `Victories pay out. Defeats cost you. Lose badly enough and it will cut into your bank. Lose catastrophically and you go into debt.\n\n` +
+      `Victories pay out. Losses cost you — but only **defenders** accumulate losses. ` +
+      `If you launch a raid and get repelled, no loss is recorded against you. You simply learn from it and move on.\n\n` +
+      `Lose badly enough as a defender and it will cut into your bank. Lose catastrophically and you go into debt.\n\n` +
       `**This is not a casual event. Build well or do not build at all.**`,
     footer: 'Raid Season Tutorial  |  Use the buttons below to navigate'
   },
@@ -10691,6 +10696,9 @@ const RAID_TUTORIAL_PAGES = [
       `- **Launch Raid + Deploy Captain** — sends your army with a Sellsword Captain attached (costs one captain)\n\n` +
       `Once you confirm, a battle embed appears in the channel. After **10 to 20 seconds**, both Actual CPs are compared and the higher one wins. ` +
       `Both you and your target are sent a DM with the result and your projected payout.\n\n` +
+      `**If your raid is repelled:**\n` +
+      `No loss is recorded against you. You walk away clean — but the defender now knows your Actual CP from the resolution reveal. ` +
+      `They can use that information to decide whether to counter-raid you.\n\n` +
       `**Rules:**\n` +
       `- You can only raid each player **once per season** — no farming the same target\n` +
       `- Offline players can be raided; they will be notified by DM\n` +
@@ -10708,6 +10716,8 @@ const RAID_TUTORIAL_PAGES = [
       `\`\`\`\n\n` +
       `The more raids you complete over the season, the more each individual win and loss is worth. ` +
       `Someone who raids twice risks $1,000 per result. Someone who raids ten times risks $5,000 per result — the maximum.\n\n` +
+      `**Important:** only **losses taken as a defender** count against you. If you launched a raid and got repelled, ` +
+      `that does not appear in your losses — it simply does not count in either direction.\n\n` +
       `**Consequences:**\n` +
       `- Positive net: cash added to your wallet\n` +
       `- Negative net: deducted from cash, then from your bank if cash runs out\n` +
