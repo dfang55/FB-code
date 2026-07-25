@@ -54,7 +54,7 @@ async function getGuildPrefix(guildId) {
   } catch (err) {
     console.error('Failed to load guild prefix:', err);
     return null;
-  }
+  } 
 }
 
 async function setGuildPrefix(guildId, prefix) {
@@ -91,6 +91,8 @@ let guildItemsCollection;
 let globalItemsCollection;
 let guildSettingsCollection;
 let marketStateCollection;
+let raidSeasonCollection;
+let raidPlayersCollection;
 
 // Initialize MongoDB connection
 async function initializeDatabase() {
@@ -117,6 +119,8 @@ async function initializeDatabase() {
     globalItemsCollection = db.collection('globalItems');
     guildSettingsCollection = db.collection('guildSettings');
     marketStateCollection = db.collection('marketState');
+    raidSeasonCollection  = db.collection('raidSeason');
+    raidPlayersCollection = db.collection('raidPlayers');
 
     // Initialize event system if it doesn't exist
     const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
@@ -159,6 +163,7 @@ global.messageTracker = {};
 global.giveArtefactSessions = {};
 global.massSellSessions = {};
 global.activeFishSessions = {};
+global.activeRaidBrowseSessions = {};
 
 // === FISHING CONSTANTS ===
 
@@ -249,6 +254,186 @@ function rollFishValue(fish) {
   if (typeof fish.value === 'number') return fish.value;
   const [min, max] = fish.value;
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// ============================================================
+// === RAID SEASON SYSTEM =====================================
+// ============================================================
+
+const RAID_UNITS = [
+  { id: 'peasant_levy',   name: 'Peasant Levy',    cost: 100,  baseCP: 8,   ascii: ' ( o )\n  \\|/\n  / \\',   description: 'Conscripted farmers armed with whatever they could find. Individually unremarkable — but coin is scarce and bodies are not.' },
+  { id: 'crossbowman',   name: 'Crossbowman',      cost: 350,  baseCP: 18,  ascii: ' ( o )\n--|-->\n  / \\',   description: 'A disciplined ranged fighter trained to loose bolts before the lines ever meet. Keeps the enemy honest at distance.' },
+  { id: 'spearman',      name: 'Spearman',         cost: 300,  baseCP: 15,  ascii: ' ( o )\n  \\|/\\\n  / \\',  description: 'A steady line-holder trained to brace against charges. The wall that keeps your ground when everything else breaks.' },
+  { id: 'man_at_arms',   name: 'Man-at-Arms',      cost: 600,  baseCP: 28,  ascii: ' { o }\n [|||]\n /| |\\',  description: 'Professional infantry clad in chainmail and carrying the scars to prove it. The backbone of any army worth fearing.' },
+  { id: 'squire',        name: 'Squire',           cost: 500,  baseCP: 22,  ascii: ' ( o )\n  -\\|-\n  / \\',   description: 'A knight-in-training burning to prove his worth. Quick, capable, and hungrier than his superiors.' },
+  { id: 'sergeant',      name: 'Sergeant',         cost: 900,  baseCP: 40,  ascii: ' [_o_]\n  )|(\n /| |\\',   description: 'A battle-hardened veteran who has buried too many men to fear anything. Holds the line so others do not break.' },
+  { id: 'knight',        name: 'Knight',           cost: 2000, baseCP: 90,  ascii: ' [#o#]\n [|||]\n /|_|\\',  description: 'A fully armoured warrior bound by blood and blade. Among the most feared on any field — and they know it.' },
+  { id: 'cavalry',       name: 'Cavalry',          cost: 1800, baseCP: 75,  ascii: ' ( o )\n /VVV\\\n/     \\', description: 'Mounted warriors who shatter enemy lines with terrifying charges. No formation survives a flank unchanged.' },
+  { id: 'siege_engineer',name: 'Siege Engineer',   cost: 1500, baseCP: 60,  ascii: ' ( o )\n_|_[==\n  / \\',   description: 'Operates trebuchets, ballistae, and battering rams. Where walls stand, the siege engineer ends them.' },
+  { id: 'battle_mage',   name: 'Battle Mage',      cost: 3000, baseCP: 130, ascii: ' (***)\n  ~|~\n  / \\',    description: 'A sorcerer who traded grimoires for war. Commands arcane force that tears through armour and morale in equal measure.' }
+];
+
+const RAID_UNITS_PER_PAGE = 3;
+
+const RAID_MERCENARY = {
+  id: 'sellsword_captain', name: 'Sellsword Captain', cost: 5000, cp: 250,
+  ascii: ' (XoX)\n /|\\/|\n  / \\',
+  description: 'A ruthless captain who fights for coin, not crown. Deployed once per raid and gone when it ends — win or lose. Does not count toward standing Relative CP.'
+};
+
+const TRAINING_MULTIPLIERS = { 1: 1.00, 2: 1.20, 3: 1.40, 4: 1.65, 5: 2.00 };
+const TRAINING_COSTS       = { 2: 800, 3: 2500, 4: 7000, 5: 18000 };
+const TRAINING_LABELS      = { 2: 'Lv.2 (+20%)', 3: 'Lv.3 (+40%)', 4: 'Lv.4 (+65%)', 5: 'Lv.5 (+100%)' };
+
+// Season-end payout: $500 per raid completed, applied per win and per loss, capped at $5,000
+const RAID_PAYOUT_RATE = 500;
+const RAID_PAYOUT_CAP  = 5000;
+
+// --- Season state ---
+
+async function getRaidSeason() {
+  if (!raidSeasonCollection) return { active: false, startedAt: null, endsAt: null, seasonId: 0 };
+  const doc = await raidSeasonCollection.findOne({ _id: 'main' });
+  return doc || { active: false, startedAt: null, endsAt: null, seasonId: 0 };
+}
+
+async function saveRaidSeason(data) {
+  await raidSeasonCollection.replaceOne({ _id: 'main' }, { _id: 'main', ...data }, { upsert: true });
+}
+
+// --- Per-player raid data ---
+
+function defaultRaidPlayer(userId) {
+  const soldiers = {}, trainingLevels = {};
+  for (const u of RAID_UNITS) { soldiers[u.id] = 0; trainingLevels[u.id] = 1; }
+  return { _id: userId, soldiers, trainingLevels, mercenariesOwned: 0, raidsInitiated: [], raidsCompleted: 0, victories: 0, losses: 0 };
+}
+
+async function getRaidPlayer(userId) {
+  if (!raidPlayersCollection) return defaultRaidPlayer(userId);
+  return (await raidPlayersCollection.findOne({ _id: userId })) || defaultRaidPlayer(userId);
+}
+
+async function saveRaidPlayer(data) {
+  await raidPlayersCollection.replaceOne({ _id: data._id }, data, { upsert: true });
+}
+
+async function getAllRaidPlayers() {
+  if (!raidPlayersCollection) return [];
+  return await raidPlayersCollection.find({}).toArray();
+}
+
+// --- CP calculation ---
+
+function calcRaidCP(raidData) {
+  let relative = 0, actual = 0;
+  for (const u of RAID_UNITS) {
+    const count = (raidData.soldiers || {})[u.id] || 0;
+    const level = (raidData.trainingLevels || {})[u.id] || 1;
+    relative += count * u.baseCP;
+    actual   += count * u.baseCP * (TRAINING_MULTIPLIERS[level] || 1.0);
+  }
+  return { relative: Math.floor(relative), actual: Math.floor(actual) };
+}
+
+// --- Raid store section builder ---
+
+async function buildRaidStoreSection(raidSubTab, raidPage, userId) {
+  const raidData  = await getRaidPlayer(userId);
+  const pageCount = raidSubTab === 'mercenaries' ? 1 : Math.ceil(RAID_UNITS.length / RAID_UNITS_PER_PAGE);
+  const safePage  = Math.max(0, Math.min(raidPage, pageCount - 1));
+
+  const subNavRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('store_tab_raid_military_0').setLabel('Buy Military')
+      .setStyle(raidSubTab === 'military' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('store_tab_raid_training_0').setLabel('Training')
+      .setStyle(raidSubTab === 'training' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('store_tab_raid_mercenaries_0').setLabel('Mercenaries')
+      .setStyle(raidSubTab === 'mercenaries' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`store_tab_raid_${raidSubTab}_${safePage - 1}`).setLabel('< Prev')
+      .setStyle(ButtonStyle.Secondary).setDisabled(safePage === 0 || raidSubTab === 'mercenaries'),
+    new ButtonBuilder().setCustomId(`store_tab_raid_${raidSubTab}_${safePage + 1}`).setLabel('Next >')
+      .setStyle(ButtonStyle.Secondary).setDisabled(safePage >= pageCount - 1 || raidSubTab === 'mercenaries')
+  );
+
+  const additionalComponents = [subNavRow];
+  const fields = [];
+
+  if (raidSubTab === 'military') {
+    const pageUnits = RAID_UNITS.slice(safePage * RAID_UNITS_PER_PAGE, (safePage + 1) * RAID_UNITS_PER_PAGE);
+    for (const u of pageUnits) {
+      const owned = (raidData.soldiers || {})[u.id] || 0;
+      fields.push({
+        name:  `${u.name}   |   $${u.cost.toLocaleString()} each   |   Base CP: ${u.baseCP}`,
+        value: `\`\`\`\n${u.ascii}\n\`\`\`${u.description}\nOwned: **${owned}**   |   CP contribution: **${(u.baseCP * owned).toLocaleString()}**`,
+        inline: false
+      });
+      additionalComponents.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_1_p${safePage}`).setLabel(`Buy x1  ($${u.cost.toLocaleString()})`).setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_5_p${safePage}`).setLabel(`Buy x5  ($${(u.cost*5).toLocaleString()})`).setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`raid_buy_${u.id}_10_p${safePage}`).setLabel(`Buy x10  ($${(u.cost*10).toLocaleString()})`).setStyle(ButtonStyle.Success)
+      ));
+    }
+    const { relative } = calcRaidCP(raidData);
+    return {
+      embeds: [new EmbedBuilder()
+        .setTitle('RAID SEASON  --  Buy Military')
+        .setDescription(`Recruit soldiers for your empire. Costs come from your cash on hand.\nPage ${safePage + 1} of ${pageCount}`)
+        .addFields(...fields, { name: 'Your Current Relative CP', value: relative.toLocaleString(), inline: true })
+        .setColor(0x8B0000).setFooter({ text: 'Limited Time Event -- Raid Season  |  Train soldiers to increase Actual CP' }).setTimestamp()],
+      additionalComponents
+    };
+
+  } else if (raidSubTab === 'training') {
+    const pageUnits = RAID_UNITS.slice(safePage * RAID_UNITS_PER_PAGE, (safePage + 1) * RAID_UNITS_PER_PAGE);
+    for (const u of pageUnits) {
+      const currentLevel = (raidData.trainingLevels || {})[u.id] || 1;
+      const nextLevel    = currentLevel + 1;
+      const nextCost     = TRAINING_COSTS[nextLevel];
+      const currentMult  = TRAINING_MULTIPLIERS[currentLevel];
+      const owned        = (raidData.soldiers || {})[u.id] || 0;
+      fields.push({
+        name:  `${u.name}   |   Training Lv.${currentLevel} / 5   |   CP Mult: x${currentMult.toFixed(2)}`,
+        value: `\`\`\`\n${u.ascii}\n\`\`\`Owned: **${owned}**  |  Actual CP per soldier: **${Math.floor(u.baseCP * currentMult)}** (base ${u.baseCP} x ${currentMult.toFixed(2)})\n${currentLevel < 5 ? `Next: **${TRAINING_LABELS[nextLevel]}** -- costs **$${nextCost.toLocaleString()}**` : 'Fully trained. This unit type has reached its peak.'}`,
+        inline: false
+      });
+      additionalComponents.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`raid_train_${u.id}_p${safePage}`)
+          .setLabel(currentLevel < 5 ? `Train -> Lv.${nextLevel}  ($${nextCost.toLocaleString()})` : 'MAX LEVEL')
+          .setStyle(currentLevel < 5 ? ButtonStyle.Primary : ButtonStyle.Secondary)
+          .setDisabled(currentLevel >= 5)
+      ));
+    }
+    return {
+      embeds: [new EmbedBuilder()
+        .setTitle('RAID SEASON  --  Training')
+        .setDescription(`Upgrade unit types to increase their Actual CP. Costs apply per unit type, not per soldier.\nPage ${safePage + 1} of ${pageCount}`)
+        .addFields(...fields)
+        .setColor(0x8B0000).setFooter({ text: 'Actual CP is hidden from other players  |  Relative CP uses base values only' }).setTimestamp()],
+      additionalComponents
+    };
+
+  } else {
+    // Mercenaries
+    const owned = raidData.mercenariesOwned || 0;
+    additionalComponents.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('raid_hire_merc_1').setLabel(`Hire x1  ($${RAID_MERCENARY.cost.toLocaleString()})`).setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('raid_hire_merc_3').setLabel(`Hire x3  ($${(RAID_MERCENARY.cost*3).toLocaleString()})`).setStyle(ButtonStyle.Success)
+    ));
+    return {
+      embeds: [new EmbedBuilder()
+        .setTitle('RAID SEASON  --  Mercenaries')
+        .setDescription('Hire Sellsword Captains to deploy in a single raid. Each captain adds significant Actual CP for that raid only — then their contract ends, win or lose.')
+        .addFields({
+          name:  `${RAID_MERCENARY.name}   |   $${RAID_MERCENARY.cost.toLocaleString()} per hire   |   +${RAID_MERCENARY.cp} Actual CP (raid only)`,
+          value: `\`\`\`\n${RAID_MERCENARY.ascii}\n\`\`\`${RAID_MERCENARY.description}\nCaptains on retainer: **${owned}**`,
+          inline: false
+        })
+        .setColor(0x8B0000).setFooter({ text: 'One captain per raid  |  Does not count toward standing Relative CP' }).setTimestamp()],
+      additionalComponents
+    };
+  }
 }
 
 // Graceful shutdown handler for Railway deployment
@@ -1709,6 +1894,19 @@ client.once('clientReady', async () => {
           .setRequired(false)),
 
     new SlashCommandBuilder()
+      .setName('viewcp')
+      .setDescription('View your empire\'s Combat Power, or inspect another player\'s public Relative CP')
+      .addUserOption(option =>
+        option.setName('player')
+          .setDescription('Player to inspect — leave blank to view your own full stats (private)')
+          .setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('raid')
+      .setDescription('Browse active Raid Season participants and launch a raid against a rival empire')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
       .setName('marble-game')
       .setDescription('Start a 4-player marble gambling game with cash betting')
       .addUserOption(option => 
@@ -1952,6 +2150,16 @@ client.once('clientReady', async () => {
         option.setName('version')
           .setDescription('Optional version tag e.g. v1.2.3')
           .setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('start-raid')
+      .setDescription('Begin a new Raid Season and broadcast to all servers (Developer only)')
+      .setDefaultMemberPermissions(0),
+
+    new SlashCommandBuilder()
+      .setName('end-raid')
+      .setDescription('End the active Raid Season, distribute payouts, and wipe all army data (Developer only)')
+      .setDefaultMemberPermissions(0),
   ];
 
   // Non-developer commands that were previously grouped with dev commands
@@ -2428,6 +2636,14 @@ client.on('interactionCreate', async interaction => {
         await handleFishCommand(interaction, userId);
         break;
 
+      case 'viewcp':
+        await handleViewCPCommand(interaction);
+        break;
+
+      case 'raid':
+        await handleRaidCommand(interaction);
+        break;
+
       case 'marble-game':
         await handleMarbleGame(interaction);
         break;
@@ -2458,6 +2674,14 @@ client.on('interactionCreate', async interaction => {
 
       case 'add-money':
         await handleAddMoneyCommand(interaction);
+        break;
+
+      case 'start-raid':
+        await handleStartRaidCommand(interaction);
+        break;
+
+      case 'end-raid':
+        await handleEndRaidCommand(interaction);
         break;
 
       case 'setevent':
@@ -4303,8 +4527,8 @@ async function handleLeaderboardCommand(interaction) {
 }
 
 // Build store nav row — active tab button is visually indicated via style
-function buildStoreNavRow(activeTab) {
-  return new ActionRowBuilder().addComponents(
+function buildStoreNavRow(activeTab, raidActive = false) {
+  const btns = [
     new ButtonBuilder()
       .setCustomId('store_tab_economy')
       .setLabel('Economy')
@@ -4313,12 +4537,20 @@ function buildStoreNavRow(activeTab) {
       .setCustomId('store_tab_minigame')
       .setLabel('Minigame Supplies')
       .setStyle(activeTab === 'minigame' ? ButtonStyle.Primary : ButtonStyle.Secondary)
-  );
+  ];
+  if (raidActive) {
+    btns.push(new ButtonBuilder()
+      .setCustomId('store_tab_raid_military_0')
+      .setLabel('[ RAID SEASON ]')
+      .setStyle(activeTab === 'raid' ? ButtonStyle.Danger : ButtonStyle.Secondary));
+  }
+  return new ActionRowBuilder().addComponents(...btns);
 }
 
 // Build {embeds, components} for the store, given the active tab and fetched data
-async function buildStorePayload(tab, userId, guildId, globalItems, guildItems) {
-  const navRow = buildStoreNavRow(tab);
+async function buildStorePayload(tab, userId, guildId, globalItems, guildItems, raidSeason = null, raidSubTab = 'military', raidPage = 0) {
+  const raidActive = !!(raidSeason && raidSeason.active);
+  const navRow = buildStoreNavRow(tab, raidActive);
   const embeds = [];
 
   if (tab === 'economy') {
@@ -4367,6 +4599,10 @@ async function buildStorePayload(tab, userId, guildId, globalItems, guildItems) 
         .setFooter({ text: 'Economy tab • Switch tabs using the buttons below' })
         .setTimestamp()
     );
+
+  } else if (tab === 'raid' && raidActive) {
+    const { embeds: raidEmbeds, additionalComponents } = await buildRaidStoreSection(raidSubTab, raidPage, userId);
+    return { embeds: raidEmbeds, components: [navRow, ...additionalComponents] };
 
   } else {
     // --- Minigame Supplies tab: Bait ---
@@ -4430,14 +4666,15 @@ async function handleStoreCommand(interaction) {
 
   try {
     const userId = interaction.user.id;
-    const [, globalItems, guildItemsDoc] = await Promise.all([
+    const [, globalItems, guildItemsDoc, raidSeason] = await Promise.all([
       getUser(userId),
       getGlobalItems(),
-      guildItemsCollection.findOne({ _id: guildId })
+      guildItemsCollection.findOne({ _id: guildId }),
+      getRaidSeason()
     ]);
     const guildItems = guildItemsDoc?.items || {};
 
-    const payload = await buildStorePayload('economy', userId, guildId, globalItems, guildItems);
+    const payload = await buildStorePayload('economy', userId, guildId, globalItems, guildItems, raidSeason);
     await interaction.editReply(payload);
   } catch (error) {
     console.error('❌ Store command error:', error);
@@ -5627,12 +5864,34 @@ async function handleComponentInteraction(interaction) {
     const guildId = interaction.guildId;
     const userId = interaction.user.id;
     if (!guildId) return await interaction.deferUpdate();
-    const [globalItems, guildItemsDoc] = await Promise.all([
+    const [globalItems, guildItemsDoc, raidSeason] = await Promise.all([
       getGlobalItems(),
-      guildItemsCollection.findOne({ _id: guildId })
+      guildItemsCollection.findOne({ _id: guildId }),
+      getRaidSeason()
     ]);
     const guildItems = guildItemsDoc?.items || {};
-    const payload = await buildStorePayload(tab, userId, guildId, globalItems, guildItems);
+    const payload = await buildStorePayload(tab, userId, guildId, globalItems, guildItems, raidSeason);
+    await interaction.update(payload);
+
+  } else if (customId.startsWith('store_tab_raid_')) {
+    // Format: store_tab_raid_{subTab}_{page}  (subTab may contain underscores e.g. man_at_arms — but our sub-tab names are single words)
+    const inner      = customId.replace('store_tab_raid_', '');
+    const lastUnd    = inner.lastIndexOf('_');
+    const raidSubTab = inner.slice(0, lastUnd);   // 'military' | 'training' | 'mercenaries'
+    const raidPage   = parseInt(inner.slice(lastUnd + 1), 10) || 0;
+    const guildId    = interaction.guildId;
+    const userId     = interaction.user.id;
+    if (!guildId) return await interaction.deferUpdate();
+    const [globalItems, guildItemsDoc, raidSeason] = await Promise.all([
+      getGlobalItems(),
+      guildItemsCollection.findOne({ _id: guildId }),
+      getRaidSeason()
+    ]);
+    if (!raidSeason || !raidSeason.active) {
+      return await interaction.reply({ content: 'The Raid Season is not currently active.', ephemeral: true });
+    }
+    const guildItems = guildItemsDoc?.items || {};
+    const payload = await buildStorePayload('raid', userId, guildId, globalItems, guildItems, raidSeason, raidSubTab, raidPage);
     await interaction.update(payload);
 
   } else if (customId.startsWith('inv_prev_') || customId.startsWith('inv_next_')) {
@@ -5653,6 +5912,42 @@ async function handleComponentInteraction(interaction) {
   } else if (customId.startsWith('fish_reel_')) {
     const sessionId = customId.replace('fish_reel_', '');
     await handleReelIn(interaction, sessionId);
+
+  } else if (customId.startsWith('raid_buy_')) {
+    await handleRaidBuyUnit(interaction);
+
+  } else if (customId.startsWith('raid_train_')) {
+    await handleRaidTrainUnit(interaction);
+
+  } else if (customId.startsWith('raid_hire_merc_')) {
+    await handleRaidHireMerc(interaction);
+
+  } else if (customId.startsWith('raid_attack_merc_')) {
+    const targetId = customId.replace('raid_attack_merc_', '');
+    await handleRaidConfirmAttack(interaction, targetId, true);
+
+  } else if (customId.startsWith('raid_attack_')) {
+    const targetId = customId.replace('raid_attack_', '');
+    await handleRaidConfirmAttack(interaction, targetId, false);
+
+  } else if (customId.startsWith('raid_select_target_')) {
+    const sessionId = customId.replace('raid_select_target_', '');
+    const session   = global.activeRaidBrowseSessions[sessionId];
+    if (!session || interaction.user.id !== session.userId) return await interaction.reply({ content: 'This raid panel is not yours.', ephemeral: true });
+    session.selectedTargetId = interaction.values[0];
+    await interaction.update(await buildRaidBrowsePayload(session, sessionId));
+
+  } else if (customId.startsWith('raid_page_')) {
+    // Format: raid_page_{sessionId}_{page}
+    const inner     = customId.replace('raid_page_', '');
+    const lastUnd   = inner.lastIndexOf('_');
+    const sessionId = inner.slice(0, lastUnd);
+    const page      = parseInt(inner.slice(lastUnd + 1), 10) || 0;
+    const session   = global.activeRaidBrowseSessions[sessionId];
+    if (!session || interaction.user.id !== session.userId) return await interaction.reply({ content: 'This raid panel is not yours.', ephemeral: true });
+    session.page = page;
+    session.selectedTargetId = null;
+    await interaction.update(await buildRaidBrowsePayload(session, sessionId));
 
   } else if (customId.startsWith('quest_claim_community_')) {
     const guildId = customId.replace('quest_claim_community_', '');
@@ -9828,6 +10123,580 @@ async function endCardDuelGame(game) {
       await game.gameMessage.edit({ embeds: [finalEmbed], components: [] });
     } catch (e) {}
   }
+}
+
+// ============================================================
+// === RAID SEASON HANDLERS ===================================
+// ============================================================
+
+async function buildRaidBrowsePayload(session, sessionId) {
+  const PER_PAGE   = 5;
+  const allPlayers = await getAllRaidPlayers();
+
+  // Only show players who have actually built something — exclude self and already-raided
+  const eligible = allPlayers.filter(p =>
+    p._id !== session.userId &&
+    !(session.raidedAlready || []).includes(p._id) &&
+    (p.raidsCompleted > 0 || Object.values(p.soldiers || {}).some(v => v > 0))
+  );
+
+  const totalPages  = Math.max(1, Math.ceil(eligible.length / PER_PAGE));
+  const safePage    = Math.max(0, Math.min(session.page, totalPages - 1));
+  session.page      = safePage;
+  const pagePlayers = eligible.slice(safePage * PER_PAGE, (safePage + 1) * PER_PAGE);
+
+  // Fetch display names in parallel
+  const userFetches = await Promise.all(pagePlayers.map(p => client.users.fetch(p._id).catch(() => null)));
+  const nameMap = {};
+  pagePlayers.forEach((p, i) => { nameMap[p._id] = userFetches[i] ? userFetches[i].username : p._id; });
+
+  const fields = [];
+  for (const p of pagePlayers) {
+    const { relative } = calcRaidCP(p);
+    const unitLines = RAID_UNITS
+      .filter(u => (p.soldiers || {})[u.id] > 0)
+      .map(u => `  ${u.ascii.split('\n')[0].trim()}  x${p.soldiers[u.id]}  ${u.name}`)
+      .join('\n') || '  (no soldiers visible)';
+    fields.push({
+      name:  `${nameMap[p._id]}   |   Relative CP: ${relative.toLocaleString()}   |   Raids done: ${p.raidsCompleted}`,
+      value: `\`\`\`\n${unitLines}\n\`\`\`Record: ${p.victories}W / ${p.losses}L   |   Training: [HIDDEN]`,
+      inline: false
+    });
+  }
+
+  if (fields.length === 0) {
+    fields.push({ name: 'No Eligible Targets', value: 'All participants have either been raided by you already, or no empire has fielded any soldiers yet. Check back later.', inline: false });
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('RAID SEASON  --  Choose Your Target')
+    .setDescription(
+      `Survey the field. Each empire shows its Relative CP and known military — training is hidden.\n\n` +
+      `Your Relative CP: **${session.myRelativeCP.toLocaleString()}**  |  Victories: **${session.myVictories}**  |  Defeats: **${session.myLosses}**\n` +
+      (session.mercenariesOwned > 0 ? `Sellsword Captains on retainer: **${session.mercenariesOwned}**` : 'No mercenaries on retainer.')
+    )
+    .addFields(...fields)
+    .setColor(0x8B0000)
+    .setFooter({ text: `Page ${safePage + 1} of ${totalPages}  |  You cannot raid the same empire twice this season` })
+    .setTimestamp();
+
+  const components = [];
+
+  if (pagePlayers.length > 0) {
+    const selectOptions = pagePlayers.map(p => {
+      const { relative } = calcRaidCP(p);
+      return { label: nameMap[p._id], value: p._id, description: `Relative CP: ${relative.toLocaleString()}  |  ${p.victories}W / ${p.losses}L`, default: p._id === session.selectedTargetId };
+    });
+    components.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`raid_select_target_${sessionId}`)
+        .setPlaceholder('Select a target empire to raid')
+        .addOptions(selectOptions)
+    ));
+  }
+
+  const hasSelected = !!session.selectedTargetId;
+  const hasMerc     = session.mercenariesOwned > 0;
+  const attackBtns  = [
+    new ButtonBuilder()
+      .setCustomId(`raid_attack_${session.selectedTargetId || 'none'}`)
+      .setLabel('Launch Raid')
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!hasSelected)
+  ];
+  if (hasMerc) {
+    attackBtns.push(new ButtonBuilder()
+      .setCustomId(`raid_attack_merc_${session.selectedTargetId || 'none'}`)
+      .setLabel('Launch Raid  +  Deploy Captain')
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!hasSelected));
+  }
+  components.push(new ActionRowBuilder().addComponents(...attackBtns));
+
+  if (totalPages > 1) {
+    components.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`raid_page_${sessionId}_${safePage - 1}`).setLabel('< Prev').setStyle(ButtonStyle.Secondary).setDisabled(safePage === 0),
+      new ButtonBuilder().setCustomId(`raid_page_${sessionId}_${safePage + 1}`).setLabel('Next >').setStyle(ButtonStyle.Secondary).setDisabled(safePage >= totalPages - 1)
+    ));
+  }
+
+  return { embeds: [embed], components };
+}
+
+async function handleViewCPCommand(interaction) {
+  const season = await getRaidSeason();
+  if (!season.active) {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder().setTitle('No Active Raid Season').setDescription('There is no Raid Season running right now.').setColor(0x8B0000).setTimestamp()],
+      ephemeral: true
+    });
+  }
+
+  const target = interaction.options.getUser('player');
+
+  if (!target || target.id === interaction.user.id) {
+    // Own CP — shows actual and relative both
+    const raidData = await getRaidPlayer(interaction.user.id);
+    const { relative, actual } = calcRaidCP(raidData);
+    const unitLines = RAID_UNITS
+      .filter(u => (raidData.soldiers || {})[u.id] > 0)
+      .map(u => {
+        const level     = (raidData.trainingLevels || {})[u.id] || 1;
+        const actualEach = Math.floor(u.baseCP * (TRAINING_MULTIPLIERS[level] || 1.0));
+        return `${u.ascii.split('\n')[0].trim()}  x${raidData.soldiers[u.id]}  ${u.name}  [Lv.${level} -- ${actualEach} Actual CP each]`;
+      }).join('\n') || '  (no soldiers recruited)';
+
+    await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`Empire of ${interaction.user.username}  --  Full Report`)
+        .setDescription('This report is private. Only you can see your Actual CP and training levels.')
+        .addFields(
+          { name: 'Relative CP (public)',  value: relative.toLocaleString(), inline: true },
+          { name: 'Actual CP (private)',   value: actual.toLocaleString(),   inline: true },
+          { name: 'Sellsword Captains',    value: `${raidData.mercenariesOwned || 0} on retainer  (+${RAID_MERCENARY.cp} Actual CP each if deployed)`, inline: false },
+          { name: 'Military Breakdown',    value: `\`\`\`\n${unitLines}\n\`\`\``, inline: false },
+          { name: 'Season Record',         value: `${raidData.victories} Victories  |  ${raidData.losses} Defeats  |  ${raidData.raidsCompleted} Raids launched`, inline: false }
+        )
+        .setColor(0x8B0000)
+        .setFooter({ text: 'Actual CP and training levels are hidden from all other players' })
+        .setTimestamp()],
+      ephemeral: true
+    });
+  } else {
+    // Another player — relative only
+    const raidData = await getRaidPlayer(target.id);
+    const { relative } = calcRaidCP(raidData);
+    const unitLines = RAID_UNITS
+      .filter(u => (raidData.soldiers || {})[u.id] > 0)
+      .map(u => `${u.ascii.split('\n')[0].trim()}  x${raidData.soldiers[u.id]}  ${u.name}`)
+      .join('\n') || '  (no soldiers visible)';
+
+    await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`Empire of ${target.username}  --  Field Intelligence`)
+        .setDescription('You are viewing public information only. Training levels and Actual CP are classified.')
+        .addFields(
+          { name: 'Relative CP',  value: `${relative.toLocaleString()}  (training: hidden)`, inline: true },
+          { name: 'Season Record', value: `${raidData.victories} Victories  |  ${raidData.losses} Defeats`, inline: true },
+          { name: 'Military',      value: `\`\`\`\n${unitLines}\n\`\`\``, inline: false }
+        )
+        .setColor(0x8B0000)
+        .setFooter({ text: 'Actual CP and training levels are classified' })
+        .setTimestamp()],
+      ephemeral: true
+    });
+  }
+}
+
+async function handleRaidCommand(interaction) {
+  const season = await getRaidSeason();
+  if (!season.active) {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder().setTitle('No Active Raid Season').setDescription('There is no Raid Season running right now. Check back when one begins.').setColor(0x8B0000).setTimestamp()],
+      ephemeral: true
+    });
+  }
+
+  const userId   = interaction.user.id;
+  const raidData = await getRaidPlayer(userId);
+  const { relative } = calcRaidCP(raidData);
+  const sessionId = `${userId}_${Date.now()}`;
+
+  global.activeRaidBrowseSessions[sessionId] = {
+    userId,
+    page:            0,
+    selectedTargetId: null,
+    raidedAlready:   raidData.raidsInitiated || [],
+    myRelativeCP:    relative,
+    myVictories:     raidData.victories,
+    myLosses:        raidData.losses,
+    mercenariesOwned: raidData.mercenariesOwned || 0
+  };
+
+  const payload = await buildRaidBrowsePayload(global.activeRaidBrowseSessions[sessionId], sessionId);
+  await interaction.reply(payload);
+
+  // Auto-clean session after 10 minutes
+  setTimeout(() => { delete global.activeRaidBrowseSessions[sessionId]; }, 600000);
+}
+
+async function handleRaidBuyUnit(interaction) {
+  const season = await getRaidSeason();
+  if (!season.active) return await interaction.reply({ content: 'No active Raid Season.', ephemeral: true });
+
+  // Format: raid_buy_{unitId}_{qty}_p{page}
+  const withoutPrefix = interaction.customId.replace('raid_buy_', '');
+  const pageMatch     = withoutPrefix.match(/_p(\d+)$/);
+  const raidPage      = pageMatch ? parseInt(pageMatch[1], 10) : 0;
+  const inner         = withoutPrefix.replace(/_p\d+$/, '').split('_');
+  const qty           = parseInt(inner.pop(), 10);
+  const unitId        = inner.join('_');
+  const unit          = RAID_UNITS.find(u => u.id === unitId);
+  if (!unit) return await interaction.reply({ content: 'Unknown unit type.', ephemeral: true });
+
+  const userId    = interaction.user.id;
+  const totalCost = unit.cost * qty;
+  await getUser(userId);
+
+  if ((userData[userId].cash || 0) < totalCost) {
+    return await interaction.reply({ content: `You need **$${totalCost.toLocaleString()}** but only have **$${(userData[userId].cash || 0).toLocaleString()}**.`, ephemeral: true });
+  }
+
+  userData[userId].cash -= totalCost;
+  await saveUserData();
+
+  const raidData = await getRaidPlayer(userId);
+  raidData.soldiers[unit.id] = (raidData.soldiers[unit.id] || 0) + qty;
+  await saveRaidPlayer(raidData);
+
+  await interaction.reply({ content: `Recruited **x${qty} ${unit.name}** for **$${totalCost.toLocaleString()}**.`, ephemeral: true });
+
+  try {
+    const [globalItems, guildItemsDoc, updatedSeason] = await Promise.all([getGlobalItems(), guildItemsCollection.findOne({ _id: interaction.guildId }), getRaidSeason()]);
+    const payload = await buildStorePayload('raid', userId, interaction.guildId, globalItems, guildItemsDoc?.items || {}, updatedSeason, 'military', raidPage);
+    await interaction.message.edit(payload);
+  } catch (e) {}
+}
+
+async function handleRaidTrainUnit(interaction) {
+  const season = await getRaidSeason();
+  if (!season.active) return await interaction.reply({ content: 'No active Raid Season.', ephemeral: true });
+
+  // Format: raid_train_{unitId}_p{page}
+  const withoutPrefix = interaction.customId.replace('raid_train_', '');
+  const pageMatch     = withoutPrefix.match(/_p(\d+)$/);
+  const raidPage      = pageMatch ? parseInt(pageMatch[1], 10) : 0;
+  const unitId        = withoutPrefix.replace(/_p\d+$/, '');
+  const unit          = RAID_UNITS.find(u => u.id === unitId);
+  if (!unit) return await interaction.reply({ content: 'Unknown unit type.', ephemeral: true });
+
+  const userId   = interaction.user.id;
+  const raidData = await getRaidPlayer(userId);
+  const curLevel = (raidData.trainingLevels || {})[unit.id] || 1;
+  if (curLevel >= 5) return await interaction.reply({ content: `${unit.name} is already at maximum training level.`, ephemeral: true });
+
+  const nextLevel = curLevel + 1;
+  const cost      = TRAINING_COSTS[nextLevel];
+  await getUser(userId);
+
+  if ((userData[userId].cash || 0) < cost) {
+    return await interaction.reply({ content: `You need **$${cost.toLocaleString()}** to train ${unit.name} to Lv.${nextLevel}.`, ephemeral: true });
+  }
+
+  userData[userId].cash -= cost;
+  await saveUserData();
+
+  raidData.trainingLevels[unit.id] = nextLevel;
+  await saveRaidPlayer(raidData);
+
+  await interaction.reply({ content: `**${unit.name}** trained to **Lv.${nextLevel}** (${TRAINING_LABELS[nextLevel]}). Cost: **$${cost.toLocaleString()}**.`, ephemeral: true });
+
+  try {
+    const [globalItems, guildItemsDoc, updatedSeason] = await Promise.all([getGlobalItems(), guildItemsCollection.findOne({ _id: interaction.guildId }), getRaidSeason()]);
+    const payload = await buildStorePayload('raid', userId, interaction.guildId, globalItems, guildItemsDoc?.items || {}, updatedSeason, 'training', raidPage);
+    await interaction.message.edit(payload);
+  } catch (e) {}
+}
+
+async function handleRaidHireMerc(interaction) {
+  const season = await getRaidSeason();
+  if (!season.active) return await interaction.reply({ content: 'No active Raid Season.', ephemeral: true });
+
+  const qty       = parseInt(interaction.customId.replace('raid_hire_merc_', ''), 10) || 1;
+  const totalCost = RAID_MERCENARY.cost * qty;
+  const userId    = interaction.user.id;
+  await getUser(userId);
+
+  if ((userData[userId].cash || 0) < totalCost) {
+    return await interaction.reply({ content: `You need **$${totalCost.toLocaleString()}** but only have **$${(userData[userId].cash || 0).toLocaleString()}**.`, ephemeral: true });
+  }
+
+  userData[userId].cash -= totalCost;
+  await saveUserData();
+
+  const raidData = await getRaidPlayer(userId);
+  raidData.mercenariesOwned = (raidData.mercenariesOwned || 0) + qty;
+  await saveRaidPlayer(raidData);
+
+  await interaction.reply({ content: `Hired **x${qty} ${RAID_MERCENARY.name}** for **$${totalCost.toLocaleString()}**. Captains on retainer: **${raidData.mercenariesOwned}**.`, ephemeral: true });
+
+  try {
+    const [globalItems, guildItemsDoc, updatedSeason] = await Promise.all([getGlobalItems(), guildItemsCollection.findOne({ _id: interaction.guildId }), getRaidSeason()]);
+    const payload = await buildStorePayload('raid', userId, interaction.guildId, globalItems, guildItemsDoc?.items || {}, updatedSeason, 'mercenaries', 0);
+    await interaction.message.edit(payload);
+  } catch (e) {}
+}
+
+async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
+  const season = await getRaidSeason();
+  if (!season.active) return await interaction.reply({ content: 'No active Raid Season.', ephemeral: true });
+
+  const attackerId = interaction.user.id;
+  if (attackerId === targetId) return await interaction.reply({ content: 'You cannot raid your own empire.', ephemeral: true });
+
+  const [attackerData, defenderData] = await Promise.all([getRaidPlayer(attackerId), getRaidPlayer(targetId)]);
+
+  if ((attackerData.raidsInitiated || []).includes(targetId)) {
+    return await interaction.reply({ content: 'You have already raided this empire this season. Choose a different target.', ephemeral: true });
+  }
+  if (deployMerc && (attackerData.mercenariesOwned || 0) < 1) {
+    return await interaction.reply({ content: 'You have no Sellsword Captains to deploy.', ephemeral: true });
+  }
+
+  if (deployMerc) attackerData.mercenariesOwned = Math.max(0, (attackerData.mercenariesOwned || 0) - 1);
+
+  attackerData.raidsInitiated = [...(attackerData.raidsInitiated || []), targetId];
+  attackerData.raidsCompleted = (attackerData.raidsCompleted || 0) + 1;
+  await saveRaidPlayer(attackerData);
+
+  // Update any active browse session for this user
+  const session = Object.values(global.activeRaidBrowseSessions).find(s => s.userId === attackerId);
+  if (session) { session.raidedAlready = attackerData.raidsInitiated; session.mercenariesOwned = attackerData.mercenariesOwned; }
+
+  const [attackerUser, defenderUser] = await Promise.all([
+    client.users.fetch(attackerId).catch(() => null),
+    client.users.fetch(targetId).catch(() => null)
+  ]);
+  const attackerName = attackerUser ? attackerUser.username : attackerId;
+  const defenderName = defenderUser ? defenderUser.username : targetId;
+
+  const attackerCP     = calcRaidCP(attackerData);
+  const defenderCP     = calcRaidCP(defenderData);
+  const attackerActual = attackerCP.actual + (deployMerc ? RAID_MERCENARY.cp : 0);
+  const defenderActual = defenderCP.actual;
+
+  const attackerLines = RAID_UNITS.filter(u => (attackerData.soldiers || {})[u.id] > 0)
+    .map(u => `  ${u.ascii.split('\n')[0].trim()}  x${attackerData.soldiers[u.id]}  ${u.name}`).join('\n') || '  (empty ranks)';
+  const defenderLines = RAID_UNITS.filter(u => (defenderData.soldiers || {})[u.id] > 0)
+    .map(u => `  ${u.ascii.split('\n')[0].trim()}  x${defenderData.soldiers[u.id]}  ${u.name}`).join('\n') || '  (empty ranks)';
+
+  const delay = Math.floor(Math.random() * 11) + 10; // 10-20 seconds
+
+  const battleLines = [
+    '==========================================',
+    `  ATTACKER                  DEFENDER`,
+    `  ${attackerName.padEnd(24)}${defenderName}`,
+    '==========================================',
+    ...RAID_UNITS.filter(u => (attackerData.soldiers || {})[u.id] > 0 || (defenderData.soldiers || {})[u.id] > 0).map(u => {
+      const aCount = (attackerData.soldiers || {})[u.id] || 0;
+      const dCount = (defenderData.soldiers || {})[u.id] || 0;
+      const art    = u.ascii.split('\n')[0].trim();
+      return `  ${aCount > 0 ? `${art} x${aCount}` : ''.padEnd(12)}   vs   ${dCount > 0 ? `${art} x${dCount}` : ''}`;
+    }),
+    '==========================================',
+    `  Rel. CP: ${attackerCP.relative.toLocaleString().padEnd(16)} Rel. CP: ${defenderCP.relative.toLocaleString()}`,
+    `  Actual CP: [HIDDEN]      Actual CP: [HIDDEN]`,
+    (deployMerc ? `  + Sellsword Captain deployed` : ''),
+    '==========================================',
+    `  The battle resolves in ${delay} seconds...`,
+    '=========================================='
+  ].filter(l => l !== '').join('\n');
+
+  const battleEmbed = new EmbedBuilder()
+    .setTitle('THE FIELD OF BATTLE')
+    .setDescription(`\`\`\`\n${battleLines}\n\`\`\``)
+    .setColor(0x8B0000)
+    .setFooter({ text: 'Training levels and Actual CP are concealed from both sides until the result is declared' })
+    .setTimestamp();
+
+  await interaction.update({ embeds: [battleEmbed], components: [] });
+
+  setTimeout(async () => {
+    try {
+      const attackerWins = attackerActual > defenderActual;
+      const winnerId     = attackerWins ? attackerId : targetId;
+      const loserId      = attackerWins ? targetId   : attackerId;
+      const winnerName   = attackerWins ? attackerName : defenderName;
+      const loserName    = attackerWins ? defenderName : attackerName;
+      const winnerActual = attackerWins ? attackerActual : defenderActual;
+      const loserActual  = attackerWins ? defenderActual : attackerActual;
+
+      if (attackerWins) { attackerData.victories = (attackerData.victories || 0) + 1; defenderData.losses = (defenderData.losses || 0) + 1; }
+      else              { attackerData.losses = (attackerData.losses || 0) + 1; defenderData.victories = (defenderData.victories || 0) + 1; }
+      await Promise.all([saveRaidPlayer(attackerData), saveRaidPlayer(defenderData)]);
+
+      const winnerRaidData = attackerWins ? attackerData : defenderData;
+      const loserRaidData  = attackerWins ? defenderData : attackerData;
+      const winnerPayout   = Math.min(winnerRaidData.raidsCompleted * RAID_PAYOUT_RATE, RAID_PAYOUT_CAP);
+      const loserPenalty   = Math.min(loserRaidData.raidsCompleted  * RAID_PAYOUT_RATE, RAID_PAYOUT_CAP);
+
+      const resultLines = [
+        '==========================================',
+        '  BATTLE RESOLVED',
+        '==========================================',
+        `  VICTOR:   ${winnerName}`,
+        `  Actual CP: ${winnerActual.toLocaleString()}`,
+        '',
+        `  DEFEATED: ${loserName}`,
+        `  Actual CP: ${loserActual.toLocaleString()}`,
+        '==========================================',
+        '  Records updated. Spoils await season end.',
+        '=========================================='
+      ].join('\n');
+
+      const resultEmbed = new EmbedBuilder()
+        .setTitle('THE BATTLE IS DECIDED')
+        .setDescription(`\`\`\`\n${resultLines}\n\`\`\``)
+        .addFields(
+          { name: 'Victor',   value: `${winnerName}  --  ${winnerRaidData.victories} victory(s) this season`, inline: true },
+          { name: 'Defeated', value: `${loserName}  --  ${loserRaidData.losses} defeat(s) this season`,      inline: true },
+          { name: 'Payout Note', value: `Winnings and losses settle at season end. The more raids you complete, the higher the stakes per result.`, inline: false }
+        )
+        .setColor(attackerWins ? 0x51CF66 : 0xFF6B6B)
+        .setTimestamp();
+
+      try { await interaction.editReply({ embeds: [resultEmbed], components: [] }); } catch (e) {}
+
+      // DM both players
+      const [winnerUser2, loserUser2] = await Promise.all([
+        client.users.fetch(winnerId).catch(() => null),
+        client.users.fetch(loserId).catch(() => null)
+      ]);
+      if (winnerUser2) winnerUser2.send({ embeds: [new EmbedBuilder()
+        .setTitle('You won a raid.')
+        .setDescription(`Your empire defeated **${loserName}** on the field of battle.`)
+        .addFields(
+          { name: 'Your Actual CP', value: winnerActual.toLocaleString(), inline: true },
+          { name: 'Opponent',       value: loserName,                      inline: true },
+          { name: 'Projected Payout', value: `+$${winnerPayout.toLocaleString()} at season end  (based on ${winnerRaidData.raidsCompleted} raids completed)`, inline: false }
+        ).setColor(0x51CF66).setTimestamp()] }).catch(() => {});
+      if (loserUser2) loserUser2.send({ embeds: [new EmbedBuilder()
+        .setTitle('Your empire was defeated.')
+        .setDescription(`**${winnerName}** overwhelmed your forces. The defeat is recorded.`)
+        .addFields(
+          { name: 'Your Actual CP', value: loserActual.toLocaleString(), inline: true },
+          { name: 'Attacker',       value: winnerName,                    inline: true },
+          { name: 'Projected Penalty', value: `-$${loserPenalty.toLocaleString()} at season end  (based on ${loserRaidData.raidsCompleted} raids completed)`, inline: false }
+        ).setColor(0xFF6B6B).setTimestamp()] }).catch(() => {});
+
+    } catch (err) { console.error('Raid resolution error:', err); }
+  }, delay * 1000);
+}
+
+async function handleStartRaidCommand(interaction) {
+  if (!isDeveloper(interaction.user.id)) {
+    return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Access Denied').setDescription('Developer only.').setColor(0xFF6B6B)], ephemeral: true });
+  }
+  const existing = await getRaidSeason();
+  if (existing.active) {
+    return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Season Already Active').setDescription('A Raid Season is already running. Use /end-raid to close it first.').setColor(0xFF9F43)], ephemeral: true });
+  }
+
+  const now      = Date.now();
+  const seasonId = (existing.seasonId || 0) + 1;
+  await saveRaidSeason({ active: true, startedAt: now, endsAt: now + 30 * 24 * 60 * 60 * 1000, seasonId });
+  await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Raid Season Started').setDescription(`Season ${seasonId} is now active. Broadcasting to all servers.`).setColor(0x8B0000)], ephemeral: true });
+
+  const announcementEmbed = new EmbedBuilder()
+    .setTitle('THE RAIDING SEASON IS UPON US')
+    .setDescription(
+      `The borders between empires grow thin. Rulers sharpen their steel, commanders marshal their forces, and coin flows toward those bold enough to seize it.\n\n` +
+      `**A new Raid Season has begun.**\n\n` +
+      `Spend your wealth to build a military. Conscript levies, hire crossbowmen, field knights, deploy battle mages. ` +
+      `Every soldier recruits adds to your **Relative CP** — visible to all. But your true strength, your **Actual CP**, sharpened by training your rivals cannot see, remains yours alone to know.\n\n` +
+      `When you are ready, march on your rivals with \`/raid\`. The battlefield does not care for your reputation. Only Actual CP decides who walks away.\n\n` +
+      `For those who prefer to fight dirty: hire **Sellsword Captains** from the Mercenaries tab in \`/store\`. They fight once and vanish — but they hit hard enough to turn the tide.\n\n` +
+      `At season end, every victory and every defeat is tallied. Victors claim their spoils. The defeated pay their debts — even if it cuts into their reserves. Even if it leaves them in ruin.\n\n` +
+      `**The season lasts 30 days.**\n\n` +
+      `Open \`/store\` to build your empire. Use \`/viewcp\` to inspect yourself or your rivals. Use \`/raid\` to declare war.\n\n` +
+      `Build well. Strike first. Leave nothing on the table.`
+    )
+    .setColor(0x8B0000)
+    .setFooter({ text: `Raid Season ${seasonId}  |  Runs for 30 days` })
+    .setTimestamp();
+
+  let broadcast = 0;
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const channelId = await getAnnouncementChannelId(guild.id);
+      let channel = channelId ? await client.channels.fetch(channelId).catch(() => null) : null;
+      if (!channel) channel = guild.channels.cache.filter(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')).sort((a, b) => a.rawPosition - b.rawPosition).first();
+      if (channel) { await channel.send({ embeds: [announcementEmbed] }); broadcast++; }
+    } catch (e) {}
+  }
+  console.log(`Raid Season ${seasonId} started — broadcast to ${broadcast} server(s).`);
+}
+
+async function handleEndRaidCommand(interaction) {
+  if (!isDeveloper(interaction.user.id)) {
+    return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Access Denied').setDescription('Developer only.').setColor(0xFF6B6B)], ephemeral: true });
+  }
+  const season = await getRaidSeason();
+  if (!season.active) {
+    return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('No Active Season').setDescription('There is no Raid Season running.').setColor(0xFF9F43)], ephemeral: true });
+  }
+
+  await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Ending Raid Season...').setDescription('Calculating payouts and wiping all army data. This may take a moment.').setColor(0x8B0000)], ephemeral: true });
+
+  const allPlayers = await getAllRaidPlayers();
+  const results    = [];
+
+  for (const p of allPlayers) {
+    if (!p.raidsCompleted && !p.victories && !p.losses) continue;
+    const rate      = Math.min((p.raidsCompleted || 0) * RAID_PAYOUT_RATE, RAID_PAYOUT_CAP);
+    const netChange = ((p.victories || 0) * rate) - ((p.losses || 0) * rate);
+
+    await getUser(p._id);
+    const user = userData[p._id];
+    if (!user) continue;
+
+    user.cash = (user.cash || 0) + netChange;
+    // If cash goes negative, draw from bank (which can also go negative — debt)
+    if (user.cash < 0) {
+      const shortfall  = Math.abs(user.cash);
+      user.cash        = 0;
+      user.bankBalance = (user.bankBalance || 0) - shortfall;
+    }
+
+    results.push({ userId: p._id, victories: p.victories || 0, losses: p.losses || 0, rate, netChange });
+  }
+
+  await saveUserData();
+  if (raidPlayersCollection) await raidPlayersCollection.deleteMany({});
+  await saveRaidSeason({ active: false, startedAt: season.startedAt, endsAt: Date.now(), seasonId: season.seasonId });
+
+  // DM individual results
+  for (const r of results) {
+    try {
+      const u = await client.users.fetch(r.userId).catch(() => null);
+      if (!u) continue;
+      const sign = r.netChange >= 0 ? '+' : '';
+      await u.send({ embeds: [new EmbedBuilder()
+        .setTitle('Raid Season Results')
+        .setDescription(`Season ${season.seasonId} has concluded. Your account has been settled.`)
+        .addFields(
+          { name: 'Final Record', value: `${r.victories} Victories  |  ${r.losses} Defeats  |  Rate: $${r.rate.toLocaleString()} per result`, inline: false },
+          { name: 'Net Change',   value: `${sign}$${r.netChange.toLocaleString()}`, inline: true }
+        )
+        .setColor(r.netChange >= 0 ? 0x51CF66 : 0xFF6B6B).setTimestamp()] }).catch(() => {});
+    } catch (e) {}
+  }
+
+  const topLines = results.sort((a, b) => b.netChange - a.netChange).slice(0, 10)
+    .map(r => `  ${r.netChange >= 0 ? '+' : ''}$${r.netChange.toLocaleString().padStart(10)}  |  ${r.victories}W/${r.losses}L  |  <@${r.userId}>`)
+    .join('\n') || '  (no active participants)';
+
+  const closingEmbed = new EmbedBuilder()
+    .setTitle('THE RAIDING SEASON HAS ENDED')
+    .setDescription(
+      `The dust settles. The ledgers are balanced. Every empire has been paid — or made to pay.\n\n` +
+      `Winnings have been deposited. Losses have been deducted. Those who overextended may find their reserves, or even their bank, cut into.\n\n` +
+      `All armies have been disbanded. All training has been erased. When the next season rises, every ruler begins from nothing.\n\n` +
+      `**Season ${season.seasonId}  --  Final Standings (Top 10)**\n\`\`\`\n${topLines}\n\`\`\``
+    )
+    .setColor(0x8B0000)
+    .setFooter({ text: `Raid Season ${season.seasonId} closed` })
+    .setTimestamp();
+
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const channelId = await getAnnouncementChannelId(guild.id);
+      let channel = channelId ? await client.channels.fetch(channelId).catch(() => null) : null;
+      if (!channel) channel = guild.channels.cache.filter(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')).sort((a, b) => a.rawPosition - b.rawPosition).first();
+      if (channel) await channel.send({ embeds: [closingEmbed] });
+    } catch (e) {}
+  }
+  console.log(`Raid Season ${season.seasonId} ended. ${results.length} player(s) settled.`);
 }
 
 client.login(token);[]
