@@ -350,9 +350,9 @@ async function buildRaidStoreSection(raidSubTab, raidPage, userId) {
       .setStyle(raidSubTab === 'training' ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('store_tab_raid_mercenaries_0').setLabel('Mercenaries')
       .setStyle(raidSubTab === 'mercenaries' ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`store_tab_raid_${raidSubTab}_${safePage - 1}`).setLabel('< Prev')
+    new ButtonBuilder().setCustomId(`store_tab_raid_${raidSubTab}_${safePage - 1}_prev`).setLabel('< Prev')
       .setStyle(ButtonStyle.Secondary).setDisabled(safePage === 0 || raidSubTab === 'mercenaries'),
-    new ButtonBuilder().setCustomId(`store_tab_raid_${raidSubTab}_${safePage + 1}`).setLabel('Next >')
+    new ButtonBuilder().setCustomId(`store_tab_raid_${raidSubTab}_${safePage + 1}_next`).setLabel('Next >')
       .setStyle(ButtonStyle.Secondary).setDisabled(safePage >= pageCount - 1 || raidSubTab === 'mercenaries')
   );
 
@@ -5879,10 +5879,12 @@ async function handleComponentInteraction(interaction) {
     let raidSubTab = 'military';
     let raidPage   = 0;
     if (customId !== 'store_tab_raid_open') {
-      const inner  = customId.replace('store_tab_raid_', '');
-      const lastUnd = inner.lastIndexOf('_');
-      raidSubTab   = inner.slice(0, lastUnd);   // 'military' | 'training' | 'mercenaries'
-      raidPage     = parseInt(inner.slice(lastUnd + 1), 10) || 0;
+      // Strip _prev/_next suffix added to pagination buttons to avoid duplicate custom IDs
+      const stripped = customId.replace(/_prev$/, '').replace(/_next$/, '');
+      const inner    = stripped.replace('store_tab_raid_', '');
+      const lastUnd  = inner.lastIndexOf('_');
+      raidSubTab     = inner.slice(0, lastUnd);   // 'military' | 'training' | 'mercenaries'
+      raidPage       = parseInt(inner.slice(lastUnd + 1), 10) || 0;
     }
     const guildId    = interaction.guildId;
     const userId     = interaction.user.id;
