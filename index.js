@@ -5893,7 +5893,7 @@ async function handleComponentInteraction(interaction) {
     }
     const guildItems = guildItemsDoc?.items || {};
     const payload = await buildStorePayload('raid', userId, guildId, globalItems, guildItems, raidSeason, raidSubTab, raidPage);
-    await interaction.editReply(payload);
+    await interaction.message.edit(payload);
 
   } else if (customId.startsWith('inv_prev_') || customId.startsWith('inv_next_')) {
     const isPrev = customId.startsWith('inv_prev_');
@@ -6080,6 +6080,11 @@ async function handleComponentInteraction(interaction) {
         await interaction.reply({ 
           content: '❌ An error occurred while processing your request. Please try again.', 
           ephemeral: true 
+        });
+      } else if (interaction.deferred) {
+        await interaction.followUp({
+          content: '❌ An error occurred while processing your request. Please try again.',
+          ephemeral: true
         });
       }
     } catch (replyError) {
