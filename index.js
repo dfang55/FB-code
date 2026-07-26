@@ -261,17 +261,246 @@ function rollFishValue(fish) {
 // ============================================================
 
 const RAID_UNITS = [
-  { id: 'peasant_levy',   name: 'Peasant Levy',    cost: 100,  baseCP: 8,   ascii: ' ( o )\n  \\|/\n  / \\',   description: 'Conscripted farmers armed with whatever they could find. Individually unremarkable — but coin is scarce and bodies are not.' },
-  { id: 'crossbowman',   name: 'Crossbowman',      cost: 350,  baseCP: 18,  ascii: ' ( o )\n--|-->\n  / \\',   description: 'A disciplined ranged fighter trained to loose bolts before the lines ever meet. Keeps the enemy honest at distance.' },
-  { id: 'spearman',      name: 'Spearman',         cost: 300,  baseCP: 15,  ascii: ' ( o )\n  \\|/\\\n  / \\',  description: 'A steady line-holder trained to brace against charges. The wall that keeps your ground when everything else breaks.' },
-  { id: 'man_at_arms',   name: 'Man-at-Arms',      cost: 600,  baseCP: 28,  ascii: ' { o }\n [|||]\n /| |\\',  description: 'Professional infantry clad in chainmail and carrying the scars to prove it. The backbone of any army worth fearing.' },
-  { id: 'squire',        name: 'Squire',           cost: 500,  baseCP: 22,  ascii: ' ( o )\n  -\\|-\n  / \\',   description: 'A knight-in-training burning to prove his worth. Quick, capable, and hungrier than his superiors.' },
-  { id: 'sergeant',      name: 'Sergeant',         cost: 900,  baseCP: 40,  ascii: ' [_o_]\n  )|(\n /| |\\',   description: 'A battle-hardened veteran who has buried too many men to fear anything. Holds the line so others do not break.' },
-  { id: 'knight',        name: 'Knight',           cost: 2000, baseCP: 90,  ascii: ' [#o#]\n [|||]\n /|_|\\',  description: 'A fully armoured warrior bound by blood and blade. Among the most feared on any field — and they know it.' },
-  { id: 'cavalry',       name: 'Cavalry',          cost: 1800, baseCP: 75,  ascii: ' ( o )\n /VVV\\\n/     \\', description: 'Mounted warriors who shatter enemy lines with terrifying charges. No formation survives a flank unchanged.' },
-  { id: 'siege_engineer',name: 'Siege Engineer',   cost: 1500, baseCP: 60,  ascii: ' ( o )\n_|_[==\n  / \\',   description: 'Operates trebuchets, ballistae, and battering rams. Where walls stand, the siege engineer ends them.' },
-  { id: 'battle_mage',   name: 'Battle Mage',      cost: 3000, baseCP: 130, ascii: ' (***)\n  ~|~\n  / \\',    description: 'A sorcerer who traded grimoires for war. Commands arcane force that tears through armour and morale in equal measure.' }
+  { id: 'peasant_levy',   name: 'Peasant Levy',    cost: 100,  baseCP: 8,   archetype: 'mob',        ascii: ' ( o )\n  \\|/\n  / \\',   description: 'Conscripted farmers armed with whatever they could find. Individually unremarkable — but coin is scarce and bodies are not.' },
+  { id: 'crossbowman',   name: 'Crossbowman',      cost: 350,  baseCP: 18,  archetype: 'ranged',     ascii: ' ( o )\n--|-->\n  / \\',   description: 'A disciplined ranged fighter trained to loose bolts before the lines ever meet. Keeps the enemy honest at distance.' },
+  { id: 'spearman',      name: 'Spearman',         cost: 300,  baseCP: 15,  archetype: 'phalanx',    ascii: ' ( o )\n  \\|/\\\n  / \\',  description: 'A steady line-holder trained to brace against charges. The wall that keeps your ground when everything else breaks.' },
+  { id: 'man_at_arms',   name: 'Man-at-Arms',      cost: 600,  baseCP: 28,  archetype: 'armored',    ascii: ' { o }\n [|||]\n /| |\\',  description: 'Professional infantry clad in chainmail and carrying the scars to prove it. The backbone of any army worth fearing.' },
+  { id: 'squire',        name: 'Squire',           cost: 500,  baseCP: 22,  archetype: 'skirmisher', ascii: ' ( o )\n  -\\|-\n  / \\',   description: 'A knight-in-training burning to prove his worth. Quick, capable, and hungrier than his superiors.' },
+  { id: 'sergeant',      name: 'Sergeant',         cost: 900,  baseCP: 40,  archetype: 'veteran',    ascii: ' [_o_]\n  )|(\n /| |\\',   description: 'A battle-hardened veteran who has buried too many men to fear anything. Holds the line so others do not break.' },
+  { id: 'knight',        name: 'Knight',           cost: 2000, baseCP: 90,  archetype: 'vanguard',   ascii: ' [#o#]\n [|||]\n /|_|\\',  description: 'A fully armoured warrior bound by blood and blade. Among the most feared on any field — and they know it.' },
+  { id: 'cavalry',       name: 'Cavalry',          cost: 1800, baseCP: 75,  archetype: 'mounted',    ascii: ' ( o )\n /VVV\\\n/     \\', description: 'Mounted warriors who shatter enemy lines with terrifying charges. No formation survives a flank unchanged.' },
+  { id: 'siege_engineer',name: 'Siege Engineer',   cost: 1500, baseCP: 60,  archetype: 'siege',      ascii: ' ( o )\n_|_[==\n  / \\',   description: 'Operates trebuchets, ballistae, and battering rams. Where walls stand, the siege engineer ends them.' },
+  { id: 'battle_mage',   name: 'Battle Mage',      cost: 3000, baseCP: 130, archetype: 'mystical',   ascii: ' (***)\n  ~|~\n  / \\',    description: 'A sorcerer who traded grimoires for war. Commands arcane force that tears through armour and morale in equal measure.' }
 ];
+
+// === ARCHETYPE SYSTEM ===================================================
+// Counter pairs (if A counters B): A gets x1.1 on its actual CP, B gets x0.9
+// Pairs:  ranged->mob, ranged->mounted, armored->ranged, phalanx->mounted,
+//         phalanx->vanguard, siege->armored, siege->phalanx,
+//         skirmisher->ranged, skirmisher->siege, veteran->mob,
+//         veteran->skirmisher, vanguard->veteran, vanguard->mob,
+//         mounted->veteran, mounted->skirmisher,
+//         mystical->armored, mystical->vanguard, mystical->mounted
+// ========================================================================
+
+const RAID_ARCHETYPES = {
+  mob: {
+    name: 'Mob', emoji: '🪖',
+    description: '🪖 Conscripted bodies with no discipline and no future. Strength in numbers alone — and even that has its limits.',
+    counters: [],
+    weakTo:   ['ranged', 'veteran', 'vanguard']
+  },
+  ranged: {
+    name: 'Ranged', emoji: '🏹',
+    description: '🏹 Looses bolts before the lines ever meet. Controls the gap, punishes exposed formations, and dictates the terms of engagement.',
+    counters: ['mob', 'mounted'],
+    weakTo:   ['armored', 'skirmisher']
+  },
+  phalanx: {
+    name: 'Phalanx', emoji: '🛡️',
+    description: '🛡️ A wall of overlapping shields and forward spears. Unmovable when it holds — devastating when it advances.',
+    counters: ['mounted', 'vanguard'],
+    weakTo:   ['siege']
+  },
+  armored: {
+    name: 'Armored', emoji: '⚔️',
+    description: '⚔️ Heavy steel and professional discipline. Absorbs what would kill lesser men and keeps marching forward.',
+    counters: ['ranged'],
+    weakTo:   ['siege', 'mystical']
+  },
+  skirmisher: {
+    name: 'Skirmisher', emoji: '🗡️',
+    description: '🗡️ Fast, unpredictable, and dangerous up close. Dismantles ranged lines and siege machinery before either can respond.',
+    counters: ['ranged', 'siege'],
+    weakTo:   ['veteran', 'mounted']
+  },
+  veteran: {
+    name: 'Veteran', emoji: '🎖️',
+    description: '🎖️ Hardened by campaigns no one else survived. Reads the enemy before they move and crushes the undisciplined without pause.',
+    counters: ['mob', 'skirmisher'],
+    weakTo:   ['vanguard', 'mounted']
+  },
+  vanguard: {
+    name: 'Vanguard', emoji: '⚜️',
+    description: '⚜️ The blade edge of an army. Elite, devastating, and bred for decisive engagements where lesser soldiers would break.',
+    counters: ['veteran', 'mob'],
+    weakTo:   ['phalanx', 'mystical']
+  },
+  mounted: {
+    name: 'Mounted', emoji: '🐎',
+    description: '🐎 Speed, momentum, and shock. Shatters lines that cannot brace in time and pursues anything that tries to run.',
+    counters: ['veteran', 'skirmisher'],
+    weakTo:   ['phalanx', 'ranged', 'mystical']
+  },
+  siege: {
+    name: 'Siege', emoji: '🪨',
+    description: '🪨 Slow, methodical, and catastrophic at range. No formation endures sustained bombardment — and none can close the distance in time.',
+    counters: ['armored', 'phalanx'],
+    weakTo:   ['skirmisher']
+  },
+  mystical: {
+    name: 'Mystical', emoji: '🔮',
+    description: '🔮 Force that operates entirely outside the rules of conventional warfare. Steel, armour, and formation are meaningless to it.',
+    counters: ['armored', 'vanguard', 'mounted'],
+    weakTo:   []
+  }
+};
+
+// Narrative text for each directional counter pair (winner_loser)
+const RAID_COUNTER_NARRATIVES = {
+  'ranged_mob':         'Bolts tear through the packed ranks before a single levy can close the gap. Range wins before the fight truly begins.',
+  'ranged_mounted':     'Volleys of fire punish the charge while momentum is still building. Horse and rider go down before the line is reached.',
+  'armored_ranged':     'Chainmail and plate turn aside what the bolts intended. The crossbow line runs out of answers as the steel keeps walking forward.',
+  'phalanx_mounted':   'The spear wall braces and holds its ground. The cavalry charge breaks against a hedge of pikes — momentum converted to carnage.',
+  'phalanx_vanguard':  'For all their individual skill, the knights find no gap. The spear wall holds what the blade alone cannot cut through.',
+  'siege_armored':     'Trebuchet stones do not negotiate with chainmail. The bombardment turns heavy infantry into a liability — nowhere to shelter, nothing to absorb it.',
+  'siege_phalanx':     'A tight formation is a siege engine\'s favourite target. Stone and fire scatter the spear wall before it can ever press forward.',
+  'skirmisher_ranged': 'The skirmishers close the distance before the crossbow line can reload. Up close, the ranged advantage disappears entirely.',
+  'skirmisher_siege':  'Fast and irregular, the skirmishers reach the war machines before the engineers can respond. The siege line collapses from within.',
+  'veteran_mob':       'Discipline meets chaos. The sergeants hold their line as the levy breaks against it — never finding purchase, never threatening the formation.',
+  'veteran_skirmisher':'The veterans read the feints and do not take the bait. Experience outlasts unpredictability every time.',
+  'vanguard_veteran':  'Even hardened soldiers struggle when elite steel arrives. Battle-worn iron bends under the weight of the charge.',
+  'vanguard_mob':      'The knights carve through the mob without slowing. No formation, no discipline — the levy has nothing to offer a Vanguard advance.',
+  'mounted_veteran':   'The cavalry flanks before the veterans can adjust their line. Speed renders earned experience irrelevant.',
+  'mounted_skirmisher':'The horses are faster. The skirmishers scatter trying to disengage, but mounted pursuit closes every gap they open.',
+  'mystical_armored':  'Arcane force passes through plate and chain as though they are not there. The heaviest infantry on the field suddenly has no answer.',
+  'mystical_vanguard': 'The knights charge toward an enemy that does not obey the rules of the field. Elite steel meets arcane force — and the steel loses.',
+  'mystical_mounted':  'Speed means nothing when the threat reaches you without moving. The cavalry charge ends before it covers the ground.'
+};
+
+const BATTLE_SECTION_NAMES = [
+  'THE EASTERN FLANK', 'THE WESTERN FLANK', 'THE LEFT WING',
+  'THE RIGHT WING',    'THE CENTER',         'THE VANGUARD LINE',
+  'THE REAR GUARD',    'THE OPEN FIELD',     'THE RIDGE LINE'
+];
+
+// Generate up to 3 battle scene strings (one per meaningful archetype matchup)
+function generateBattleScenes(attackerData, defenderData, attackerName, defenderName, deployMerc) {
+  const scenes      = [];
+  const usedPairs   = new Set();
+  const usedSections = [];
+
+  // Collect all meaningful matchups (where at least one side counters the other)
+  const matchups = [];
+  for (const uA of RAID_UNITS) {
+    const aCount = (attackerData.soldiers?.[uA.id] || 0);
+    if (aCount === 0) continue;
+    const archA = RAID_ARCHETYPES[uA.archetype];
+    for (const uD of RAID_UNITS) {
+      const dCount = (defenderData.soldiers?.[uD.id] || 0);
+      if (dCount === 0) continue;
+      const aCountersD = archA.counters.includes(uD.archetype);
+      const dCountersA = RAID_ARCHETYPES[uD.archetype].counters.includes(uA.archetype);
+      if (!aCountersD && !dCountersA) continue;
+      matchups.push({ uA, uD, aCount, dCount, aCountersD, dCountersA, significance: aCount * uA.baseCP + dCount * uD.baseCP });
+    }
+  }
+  matchups.sort((a, b) => b.significance - a.significance);
+
+  for (const m of matchups) {
+    if (scenes.length >= 3) break;
+    const pairKey = `${m.uA.archetype}_${m.uD.archetype}`;
+    const pairKeyR = `${m.uD.archetype}_${m.uA.archetype}`;
+    if (usedPairs.has(pairKey) || usedPairs.has(pairKeyR)) continue;
+    usedPairs.add(pairKey);
+
+    // Pick a unique section name
+    let sectionName = BATTLE_SECTION_NAMES.find(s => !usedSections.includes(s)) || BATTLE_SECTION_NAMES[0];
+    usedSections.push(sectionName);
+
+    const artA = m.uA.ascii.split('\n')[0].trim();
+    const artD = m.uD.ascii.split('\n')[0].trim();
+
+    let narrative, advantageLine;
+    if (m.aCountersD && !m.dCountersA) {
+      narrative     = RAID_COUNTER_NARRATIVES[`${m.uA.archetype}_${m.uD.archetype}`] || `${m.uA.name} has the advantage over ${m.uD.name} on this line.`;
+      advantageLine = `ADVANTAGE -- ${attackerName}`;
+    } else if (m.dCountersA && !m.aCountersD) {
+      narrative     = RAID_COUNTER_NARRATIVES[`${m.uD.archetype}_${m.uA.archetype}`] || `${m.uD.name} has the advantage over ${m.uA.name} on this line.`;
+      advantageLine = `ADVANTAGE -- ${defenderName}`;
+    } else {
+      narrative     = 'Both sides press forward. The advantage shifts with every exchange — neither formation is willing to break first.';
+      advantageLine = 'CONTESTED';
+    }
+
+    scenes.push([
+      '==========================================',
+      `  ${sectionName}`,
+      `  ${attackerName}: ${artA} x${m.aCount} ${m.uA.name}`,
+      `  ${defenderName}: ${artD} x${m.dCount} ${m.uD.name}`,
+      '==========================================',
+      `  ${narrative}`,
+      '',
+      `  ${advantageLine}`,
+      '==========================================',
+    ].join('\n'));
+  }
+
+  // Fallback if no archetype matchups existed
+  if (scenes.length === 0) {
+    scenes.push([
+      '==========================================',
+      `  ${BATTLE_SECTION_NAMES[0]}`,
+      `  ${attackerName} meets ${defenderName} on open ground`,
+      '==========================================',
+      '  No decisive archetype advantage on any line.',
+      '  The outcome rests on training and numbers alone.',
+      '==========================================',
+    ].join('\n'));
+  }
+
+  if (deployMerc) {
+    scenes.push([
+      '==========================================',
+      '  THE SELLSWORD',
+      `  ${attackerName} deploys a Sellsword Captain`,
+      '==========================================',
+      '  The captain cuts through the chaos, fighting for coin',
+      '  and not crown — bringing ruthlessness no formation',
+      '  can account for.',
+      '==========================================',
+    ].join('\n'));
+  }
+
+  return scenes;
+}
+
+// CP calculation that applies per-unit archetype multipliers based on enemy composition
+function calcRaidCPWithMatchups(attackerRaidData, defenderRaidData, deployMerc = false) {
+  const defArchetypes = new Set();
+  const attArchetypes = new Set();
+  for (const u of RAID_UNITS) {
+    if ((attackerRaidData.soldiers?.[u.id] || 0) > 0) attArchetypes.add(u.archetype);
+    if ((defenderRaidData.soldiers?.[u.id] || 0) > 0) defArchetypes.add(u.archetype);
+  }
+
+  let attackerAdjusted = 0, defenderAdjusted = 0;
+
+  for (const u of RAID_UNITS) {
+    const arch = RAID_ARCHETYPES[u.archetype];
+
+    const aCount = (attackerRaidData.soldiers?.[u.id] || 0);
+    if (aCount > 0) {
+      const aLevel = (attackerRaidData.trainingLevels?.[u.id] || 1);
+      let aCP = aCount * u.baseCP * (TRAINING_MULTIPLIERS[aLevel] || 1.0);
+      if (arch.counters.some(c => defArchetypes.has(c))) aCP *= 1.1;
+      if (arch.weakTo.some(w => defArchetypes.has(w)))   aCP *= 0.9;
+      attackerAdjusted += aCP;
+    }
+
+    const dCount = (defenderRaidData.soldiers?.[u.id] || 0);
+    if (dCount > 0) {
+      const dLevel = (defenderRaidData.trainingLevels?.[u.id] || 1);
+      let dCP = dCount * u.baseCP * (TRAINING_MULTIPLIERS[dLevel] || 1.0);
+      if (arch.counters.some(c => attArchetypes.has(c))) dCP *= 1.1;
+      if (arch.weakTo.some(w => attArchetypes.has(w)))   dCP *= 0.9;
+      defenderAdjusted += dCP;
+    }
+  }
+
+  if (deployMerc) attackerAdjusted += RAID_MERCENARY.cp;
+  return { attackerAdjusted: Math.floor(attackerAdjusted), defenderAdjusted: Math.floor(defenderAdjusted) };
+}
 
 const RAID_UNITS_PER_PAGE = 3;
 
@@ -363,9 +592,12 @@ async function buildRaidStoreSection(raidSubTab, raidPage, userId) {
     const pageUnits = RAID_UNITS.slice(safePage * RAID_UNITS_PER_PAGE, (safePage + 1) * RAID_UNITS_PER_PAGE);
     for (const u of pageUnits) {
       const owned = (raidData.soldiers || {})[u.id] || 0;
+      const arch  = RAID_ARCHETYPES[u.archetype];
+      const countersText = arch.counters.length > 0 ? arch.counters.map(c => RAID_ARCHETYPES[c].name).join(', ') : 'None';
+      const weakToText   = arch.weakTo.length   > 0 ? arch.weakTo.map(w => RAID_ARCHETYPES[w].name).join(', ')   : 'None';
       fields.push({
-        name:  `${u.name}   |   $${u.cost.toLocaleString()} each   |   Base CP: ${u.baseCP}`,
-        value: `\`\`\`\n${u.ascii}\n\`\`\`${u.description}\nOwned: **${owned}**   |   CP contribution: **${(u.baseCP * owned).toLocaleString()}**`,
+        name:  `${u.name}   |   $${u.cost.toLocaleString()} each   |   Base CP: ${u.baseCP}   |   ${arch.emoji} ${arch.name}`,
+        value: `\`\`\`\n${u.ascii}\n\`\`\`${u.description}\n${arch.description}\nCounters: **${countersText}**   |   Weak to: **${weakToText}**\nOwned: **${owned}**   |   CP contribution: **${(u.baseCP * owned).toLocaleString()}**`,
         inline: false
       });
       additionalComponents.push(new ActionRowBuilder().addComponents(
@@ -10170,7 +10402,10 @@ async function buildRaidBrowsePayload(session, sessionId) {
     const { relative } = calcRaidCP(p);
     const unitLines = RAID_UNITS
       .filter(u => (p.soldiers || {})[u.id] > 0)
-      .map(u => `  ${u.ascii.split('\n')[0].trim()}  x${p.soldiers[u.id]}  ${u.name}`)
+      .map(u => {
+        const arch = RAID_ARCHETYPES[u.archetype];
+        return `  ${u.ascii.split('\n')[0].trim()}  x${p.soldiers[u.id]}  ${u.name}  [${arch.emoji} ${arch.name}]`;
+      })
       .join('\n') || '  (no soldiers visible)';
     fields.push({
       name:  `${nameMap[p._id]}   |   Relative CP: ${relative.toLocaleString()}   |   Raids done: ${p.raidsCompleted}`,
@@ -10475,19 +10710,19 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
   const attackerName = attackerUser ? attackerUser.username : attackerId;
   const defenderName = defenderUser ? defenderUser.username : targetId;
 
-  const attackerCP     = calcRaidCP(attackerData);
-  const defenderCP     = calcRaidCP(defenderData);
-  const attackerActual = attackerCP.actual + (deployMerc ? RAID_MERCENARY.cp : 0);
-  const defenderActual = defenderCP.actual;
+  // Relative CP for display; matchup-adjusted CP for resolution
+  const attackerCP = calcRaidCP(attackerData);
+  const defenderCP = calcRaidCP(defenderData);
+  const { attackerAdjusted, defenderAdjusted } = calcRaidCPWithMatchups(attackerData, defenderData, deployMerc);
 
-  const attackerLines = RAID_UNITS.filter(u => (attackerData.soldiers || {})[u.id] > 0)
-    .map(u => `  ${u.ascii.split('\n')[0].trim()}  x${attackerData.soldiers[u.id]}  ${u.name}`).join('\n') || '  (empty ranks)';
-  const defenderLines = RAID_UNITS.filter(u => (defenderData.soldiers || {})[u.id] > 0)
-    .map(u => `  ${u.ascii.split('\n')[0].trim()}  x${defenderData.soldiers[u.id]}  ${u.name}`).join('\n') || '  (empty ranks)';
-
+  // Build opening battle overview embed
   const delay = Math.floor(Math.random() * 11) + 10; // 10-20 seconds
+  const scenes = generateBattleScenes(attackerData, defenderData, attackerName, defenderName, deployMerc);
+  // Distribute scenes evenly across the delay window, leaving the last slot for the result
+  const stageCount  = scenes.length;
+  const stageDelay  = Math.floor((delay * 1000) / (stageCount + 1));
 
-  const battleLines = [
+  const openingLines = [
     '==========================================',
     `  ATTACKER                  DEFENDER`,
     `  ${attackerName.padEnd(24)}${defenderName}`,
@@ -10495,36 +10730,55 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
     ...RAID_UNITS.filter(u => (attackerData.soldiers || {})[u.id] > 0 || (defenderData.soldiers || {})[u.id] > 0).map(u => {
       const aCount = (attackerData.soldiers || {})[u.id] || 0;
       const dCount = (defenderData.soldiers || {})[u.id] || 0;
+      const arch   = RAID_ARCHETYPES[u.archetype];
       const art    = u.ascii.split('\n')[0].trim();
-      return `  ${aCount > 0 ? `${art} x${aCount}` : ''.padEnd(12)}   vs   ${dCount > 0 ? `${art} x${dCount}` : ''}`;
+      const aStr   = aCount > 0 ? `${art} x${aCount} [${arch.name}]` : '';
+      const dStr   = dCount > 0 ? `${art} x${dCount} [${arch.name}]` : '';
+      return `  ${aStr.padEnd(28)}${dStr}`;
     }),
     '==========================================',
     `  Rel. CP: ${attackerCP.relative.toLocaleString().padEnd(16)} Rel. CP: ${defenderCP.relative.toLocaleString()}`,
     `  Actual CP: [HIDDEN]      Actual CP: [HIDDEN]`,
     (deployMerc ? `  + Sellsword Captain deployed` : ''),
     '==========================================',
-    `  The battle resolves in ${delay} seconds...`,
+    `  Armies engaged. The field is in motion...`,
     '=========================================='
   ].filter(l => l !== '').join('\n');
 
-  const battleEmbed = new EmbedBuilder()
+  const openingEmbed = new EmbedBuilder()
     .setTitle('THE FIELD OF BATTLE')
-    .setDescription(`\`\`\`\n${battleLines}\n\`\`\``)
+    .setDescription(`\`\`\`\n${openingLines}\n\`\`\``)
     .setColor(0x8B0000)
-    .setFooter({ text: 'Training levels and Actual CP are concealed from both sides until the result is declared' })
+    .setFooter({ text: 'Archetype matchups are being resolved across the battlefield' })
     .setTimestamp();
 
-  await interaction.update({ embeds: [battleEmbed], components: [] });
+  await interaction.update({ embeds: [openingEmbed], components: [] });
 
+  // Schedule each battlefield scene as an embed edit
+  for (let i = 0; i < stageCount; i++) {
+    setTimeout(async () => {
+      try {
+        const sceneEmbed = new EmbedBuilder()
+          .setTitle(`THE FIELD OF BATTLE  --  Scene ${i + 1} of ${stageCount}`)
+          .setDescription(`\`\`\`\n${scenes[i]}\n\`\`\``)
+          .setColor(0x8B0000)
+          .setFooter({ text: 'Actual CP is concealed from both sides until the result is declared' })
+          .setTimestamp();
+        await interaction.editReply({ embeds: [sceneEmbed], components: [] });
+      } catch (e) {}
+    }, stageDelay * (i + 1));
+  }
+
+  // Final resolution after the full delay
   setTimeout(async () => {
     try {
-      const attackerWins = attackerActual > defenderActual;
+      const attackerWins = attackerAdjusted > defenderAdjusted;
       const winnerId     = attackerWins ? attackerId : targetId;
       const loserId      = attackerWins ? targetId   : attackerId;
       const winnerName   = attackerWins ? attackerName : defenderName;
       const loserName    = attackerWins ? defenderName : attackerName;
-      const winnerActual = attackerWins ? attackerActual : defenderActual;
-      const loserActual  = attackerWins ? defenderActual : attackerActual;
+      const winnerCP     = attackerWins ? attackerAdjusted : defenderAdjusted;
+      const loserCP      = attackerWins ? defenderAdjusted : attackerAdjusted;
 
       if (attackerWins) { attackerData.victories = (attackerData.victories || 0) + 1; defenderData.losses = (defenderData.losses || 0) + 1; }
       else              { defenderData.victories = (defenderData.victories || 0) + 1; }
@@ -10541,10 +10795,10 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
         '  BATTLE RESOLVED',
         '==========================================',
         `  VICTOR:   ${winnerName}`,
-        `  Actual CP: ${winnerActual.toLocaleString()}`,
+        `  Adjusted CP: ${winnerCP.toLocaleString()}`,
         '',
         `  DEFEATED: ${loserName}`,
-        `  Actual CP: ${loserActual.toLocaleString()}`,
+        `  Adjusted CP: ${loserCP.toLocaleString()}`,
         '==========================================',
         '  Records updated. Spoils await season end.',
         '=========================================='
@@ -10572,17 +10826,17 @@ async function handleRaidConfirmAttack(interaction, targetId, deployMerc) {
         .setTitle('You won a raid.')
         .setDescription(`Your empire defeated **${loserName}** on the field of battle.`)
         .addFields(
-          { name: 'Your Actual CP', value: winnerActual.toLocaleString(), inline: true },
-          { name: 'Opponent',       value: loserName,                      inline: true },
+          { name: 'Your Adjusted CP', value: winnerCP.toLocaleString(), inline: true },
+          { name: 'Opponent',         value: loserName,                  inline: true },
           { name: 'Projected Payout', value: `+$${winnerPayout.toLocaleString()} at season end  (based on ${winnerRaidData.raidsCompleted} raids completed)`, inline: false }
         ).setColor(0x51CF66).setTimestamp()] }).catch(() => {});
       if (loserUser2) loserUser2.send({ embeds: [new EmbedBuilder()
         .setTitle(attackerWins ? 'Your empire was defeated.' : 'Your raid was repelled.')
         .setDescription(attackerWins
           ? `**${winnerName}** overwhelmed your forces. The defeat is recorded.`
-          : `**${winnerName}** held their ground and drove your forces back. No loss has been recorded — but they now know your Actual CP.`)
+          : `**${winnerName}** held their ground and drove your forces back. No loss has been recorded — but they now know your Adjusted CP.`)
         .addFields(
-          { name: 'Your Actual CP', value: loserActual.toLocaleString(), inline: true },
+          { name: 'Your Adjusted CP', value: loserCP.toLocaleString(), inline: true },
           { name: attackerWins ? 'Attacker' : 'Defender', value: winnerName, inline: true },
           ...(attackerWins ? [{ name: 'Projected Penalty', value: `-$${loserPenalty.toLocaleString()} at season end  (based on ${loserRaidData.raidsCompleted} raids completed)`, inline: false }] : [])
         ).setColor(0xFF6B6B).setTimestamp()] }).catch(() => {});
