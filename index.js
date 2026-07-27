@@ -28,6 +28,23 @@ function isDeveloper(userId) {
   return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID;
 }
 
+// === Server blacklist ===
+
+async function isServerBlacklisted(guildId) {
+  if (!serverBlacklistCollection || !guildId) return false;
+  const doc = await serverBlacklistCollection.findOne({ _id: guildId });
+  return !!(doc && doc.blacklisted);
+}
+
+async function setServerBlacklist(guildId, blacklisted) {
+  if (!serverBlacklistCollection) return;
+  await serverBlacklistCollection.updateOne(
+    { _id: guildId },
+    { $set: { _id: guildId, blacklisted, updatedAt: Date.now() } },
+    { upsert: true }
+  );
+}
+
 // === Prefix system (per-guild text command prefix) ===
 const PREFIX_CACHE = new Map();
 
@@ -1918,6 +1935,16 @@ client.on('messageCreate', async (message) => {
   // Database not ready yet — ignore until fully initialised
   if (!usersCollection) return;
 
+  // Server blacklist gate — notify and block activity from blacklisted servers
+  if (message.guildId && await isServerBlacklisted(message.guildId)) {
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setTitle('Server Blacklisted')
+      .setDescription('This server has been blacklisted and can no longer use this bot.')
+      .setColor(0xFF6B6B)
+      .setTimestamp()] }).catch(() => {});
+    return;
+  }
+
   // === Prefix command dispatch ===
   if (message.guildId) {
     try {
@@ -2495,6 +2522,21 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  // Server blacklist gate — notify and block interactions from blacklisted servers
+  // Developer interactions bypass the gate so the command itself remains usable
+  if (interaction.guildId && !isDeveloper(interaction.user.id)) {
+    if (await isServerBlacklisted(interaction.guildId)) {
+      if (interaction.isRepliable()) {
+        await interaction.reply({ embeds: [new EmbedBuilder()
+          .setTitle('Server Blacklisted')
+          .setDescription('This server has been blacklisted and can no longer use this bot.')
+          .setColor(0xFF6B6B)
+          .setTimestamp()], ephemeral: true }).catch(() => {});
+      }
+      return;
+    }
+  }
+
   if (interaction.isAutocomplete()) {
     const { commandName, focusedOption } = interaction;
 
@@ -2933,6 +2975,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'end-raid':
         await handleEndRaidCommand(interaction);
+        break;
+
+      case 'serverblacklist':
+        await handleServerBlacklistCommand(interaction);
         break;
 
       case 'setevent':
@@ -11051,6 +11097,55 @@ async function handleRaidTutorialButton(interaction) {
     await interaction.update(payload);
   } else {
     await interaction.reply(payload);
+  }
+}
+
+async function handleServerBlacklistCommand(interaction) {
+  if (!isDeveloper(interaction.user.id)) {
+    return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Access Denied').setDescription('Developer only.').setColor(0xFF6B6B)], ephemeral: true });
+  }
+
+  const serverId = interaction.options.getString('serverid').trim();
+  const action   = interaction.options.getString('action'); // 'blacklist' | 'unblacklist'
+
+  // Basic snowflake sanity check
+  if (!/^\d{17,20}$/.test(serverId)) {
+    return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Invalid Server ID').setDescription(`\`${serverId}\` does not look like a valid Discord server ID.`).setColor(0xFF6B6B)], ephemeral: true });
+  }
+
+  const isCurrentlyBlacklisted = await isServerBlacklisted(serverId);
+
+  if (action === 'blacklist') {
+    if (isCurrentlyBlacklisted) {
+      return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Already Blacklisted').setDescription(`Server \`${serverId}\` is already on the blacklist.`).setColor(0xFF9F43)], ephemeral: true });
+    }
+    await setServerBlacklist(serverId, true);
+
+    // Attempt to resolve the server name for clarity
+    const guild = client.guilds.cache.get(serverId);
+    const serverName = guild ? `**${guild.name}** (\`${serverId}\`)` : `\`${serverId}\``;
+
+    return await interaction.reply({ embeds: [new EmbedBuilder()
+      .setTitle('Server Blacklisted')
+      .setDescription(`${serverName} has been blacklisted. All interactions and messages from that server will be silently dropped.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp()], ephemeral: true });
+  }
+
+  if (action === 'unblacklist') {
+    if (!isCurrentlyBlacklisted) {
+      return await interaction.reply({ embeds: [new EmbedBuilder().setTitle('Not Blacklisted').setDescription(`Server \`${serverId}\` is not currently on the blacklist.`).setColor(0xFF9F43)], ephemeral: true });
+    }
+    await setServerBlacklist(serverId, false);
+
+    const guild = client.guilds.cache.get(serverId);
+    const serverName = guild ? `**${guild.name}** (\`${serverId}\`)` : `\`${serverId}\``;
+
+    return await interaction.reply({ embeds: [new EmbedBuilder()
+      .setTitle('Server Unblacklisted')
+      .setDescription(`${serverName} has been removed from the blacklist and can use the bot again.`)
+      .setColor(0x51CF66)
+      .setTimestamp()], ephemeral: true });
   }
 }
 
