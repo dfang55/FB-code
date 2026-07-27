@@ -93,6 +93,7 @@ let guildSettingsCollection;
 let marketStateCollection;
 let raidSeasonCollection;
 let raidPlayersCollection;
+let serverBlacklistCollection;
 
 // Initialize MongoDB connection
 async function initializeDatabase() {
@@ -119,8 +120,9 @@ async function initializeDatabase() {
     globalItemsCollection = db.collection('globalItems');
     guildSettingsCollection = db.collection('guildSettings');
     marketStateCollection = db.collection('marketState');
-    raidSeasonCollection  = db.collection('raidSeason');
-    raidPlayersCollection = db.collection('raidPlayers');
+    raidSeasonCollection      = db.collection('raidSeason');
+    raidPlayersCollection     = db.collection('raidPlayers');
+    serverBlacklistCollection = db.collection('serverBlacklist');
 
     // Initialize event system if it doesn't exist
     const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
@@ -2392,6 +2394,23 @@ client.once('clientReady', async () => {
       .setName('end-raid')
       .setDescription('End the active Raid Season, distribute payouts, and wipe all army data (Developer only)')
       .setDefaultMemberPermissions(0),
+
+    new SlashCommandBuilder()
+      .setName('serverblacklist')
+      .setDescription('Blacklist or unblacklist a server from using the bot (Developer only)')
+      .setDefaultMemberPermissions(0)
+      .addStringOption(option =>
+        option.setName('serverid')
+          .setDescription('The server ID to blacklist or unblacklist')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('action')
+          .setDescription('Whether to blacklist or unblacklist the server')
+          .setRequired(true)
+          .addChoices(
+            { name: 'Blacklist',   value: 'blacklist'   },
+            { name: 'Unblacklist', value: 'unblacklist' }
+          )),
   ];
 
   // Non-developer commands that were previously grouped with dev commands
