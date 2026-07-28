@@ -30,20 +30,15 @@ function isDeveloper(userId) {
 
 // === Server blacklist ===
 
-async function isServerBlacklisted(guildId) {
-  if (!serverBlacklistCollection || !guildId) return false;
-  const doc = await serverBlacklistCollection.findOne({ _id: guildId });
-  return !!(doc && doc.blacklisted);
-}
+// Servers hardcoded as permanently blacklisted regardless of database state
+const HARDCODED_BLACKLISTED_SERVERS = new Set([
+  '1029577794935595048'
+]);
 
-async function setServerBlacklist(guildId, blacklisted) {
-  if (!serverBlacklistCollection) return;
-  await serverBlacklistCollection.updateOne(
-    { _id: guildId },
-    { $set: { _id: guildId, blacklisted, updatedAt: Date.now() } },
-    { upsert: true }
-  );
-}
+async function isServerBlacklisted(guildId) {
+  if (!guildId) return false;
+  if (HARDCODED_BLACKLISTED_SERVERS.has(guildId)) return true;
+  if (!serverBlacklistCollection) return false;
 
 // === Prefix system (per-guild text command prefix) ===
 const PREFIX_CACHE = new Map();
